@@ -8,7 +8,7 @@ inferencer = MMPoseInferencer(
     device="cuda"
 ) 
 
-img = cv2.imread("assets/demo.png")
+img = cv2.imread("assets/demo_02.png")
 
 result_gen = inferencer(img, show=True)
 

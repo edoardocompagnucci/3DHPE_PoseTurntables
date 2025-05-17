@@ -20,5 +20,3 @@ dependencies:
       - mmcv==2.1.0
       - mmdet>=3.3.0
       - openmim>=0.3
-      # editable mmpose installed after env creation:
-      #   pip install -e ../mmpose
