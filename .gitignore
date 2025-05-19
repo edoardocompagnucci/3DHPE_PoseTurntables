@@ -5,3 +5,6 @@
 /assets/hdr/
 /src/render/houdini/scenes/backup/
 /src/render/houdini/scenes/geo/
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
