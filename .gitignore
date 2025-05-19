@@ -1,5 +1,6 @@
 # data & models
 /data/
+/checkpoints/
 /assets/fbx/
 /assets/hdr/
 /src/render/houdini/scenes/backup/

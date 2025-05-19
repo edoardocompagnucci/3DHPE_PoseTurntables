@@ -13,7 +13,7 @@ class MLPLifter(nn.Module):
             nn.ReLU(),
 
             nn.Linear(512, 512),
-            nn.ReLu(),
+            nn.ReLU(),
 
             nn.Linear(512, output_size)
         )
