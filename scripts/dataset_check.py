@@ -1,13 +1,11 @@
 import os, numpy as np, matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D          # registers 3-D projection
+from mpl_toolkits.mplot3d import Axes3D
 from PIL import Image
+import os
 
-# --------------------------------------------------------
-# EDIT THESE TWO LINES
-# --------------------------------------------------------
-DATA_ROOT = r"C:\Users\Drako\Desktop\Projects\3dhpe_a\data"
-FRAME_ID  = "rp_carla_rigged_001_FBX_idx19"
-# --------------------------------------------------------
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "data"))
+FRAME_ID  = "rp_carla_rigged_001_FBX_hdr0_camera30_pos10"
 
 paths = {
     "rgb": os.path.join(DATA_ROOT, "raw", "rgb",          f"{FRAME_ID}.png"),
@@ -18,24 +16,20 @@ paths = {
     "t":   os.path.join(DATA_ROOT, "annotations", "t",         f"{FRAME_ID}.npy"),
 }
 
-# ---------- load ----------
 img  = np.array(Image.open(paths["rgb"]))
 j3d  = np.load(paths["j3d"])
 K    = np.load(paths["K"])
 R    = np.load(paths["R"])
 t    = np.load(paths["t"])
 
-# ---------- project ----------
 cam_pts = (R @ j3d.T + t.reshape(3, 1))       # (3,J)
 proj_2d = (K @ cam_pts).T
 proj_2d = proj_2d[:, :2] / proj_2d[:, 2:3]
 
-# ========================================================
-# FIRST FIGURE  –  2-D overlay
-# ========================================================
 plt.figure(figsize=(8, 8 * img.shape[0] / img.shape[1]))
 plt.imshow(img)
 plt.scatter(proj_2d[:, 0], proj_2d[:, 1], s=30, label="projected 3-D")
+
 if os.path.exists(paths["j2d"]):
     j2d = np.load(paths["j2d"])
     plt.scatter(j2d[:, 0], j2d[:, 1], marker="x", s=25, label="stored 2-D")
@@ -43,10 +37,6 @@ plt.axis("off")
 plt.title(f"{FRAME_ID} – 2-D projection check")
 plt.legend()
 plt.show()
-
-# ========================================================
-# SECOND FIGURE  –  3-D scatter
-# ========================================================
 
 fig = plt.figure(figsize=(6, 6))
 ax = fig.add_subplot(111, projection="3d")
@@ -59,4 +49,3 @@ ax.set_zlabel("Z")
 ax.set_title(f"{FRAME_ID} – 3-D joint positions")
 plt.show()
 
-print(j3d)
