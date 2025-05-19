@@ -2,11 +2,12 @@ import torch
 from torch.utils.data import Dataset
 import os
 import numpy as np
+from PIL import Image
 
 class SyntheticPoseDataset(Dataset):
     def __init__(self, data_root, split_txt, transform=None):
         self.data_root = data_root
-        self.split_text = split_txt
+        self.split_txt = split_txt
         self.transform = transform
 
         with open(split_txt) as f:
@@ -23,28 +24,45 @@ class SyntheticPoseDataset(Dataset):
         }
 
     def __len__(self):
-        return len(self.frame_ids)
+        return len(self.data_ids)
     
     def __getitem__(self, idx):
         data_id = self.data_ids[idx]
 
+        img_path = os.path.join(self.paths["img"], f"{data_id}.png")
+        img = np.array(Image.open(img_path)) if os.path.exists(img_path) else None
+        
         sample = {
-            "joints_2d": np.load(os.path.join(self.paths["joints_2d"], f"{data_id}.npy")),
-            "joints_3d": np.load(os.path.join(self.paths["joints_3d"], f"{data_id}.npy")),
-            "rot_mats": np.load(os.path.join(self.paths["joints_3d"], f"{data_id}.npy")),
-            "K": np.load(os.path.join(self.paths["K"], f"{data_id}.npy")),
-            "R": np.load(os.path.join(self.paths["R"], f"{data_id}.npy")),
-            "t": np.load(os.path.join(self.paths["t"], f"{data_id}.npy")),
-            "img": np.load(os.path.join(self.paths["img"], f"{data_id}.png"))
-            
+            "joints_2d": torch.tensor(
+                np.load(os.path.join(self.paths["joints_2d"], f"{data_id}.npy")),
+                dtype=torch.float32
+            ),
+            "joints_3d": torch.tensor(
+                np.load(os.path.join(self.paths["joints_3d"], f"{data_id}.npy")),
+                dtype=torch.float32
+            ),
+            "rot_mats": torch.tensor(
+                np.load(os.path.join(self.paths["rot_mats"], f"{data_id}.npy")),
+                dtype=torch.float32
+            ),
+            "K": torch.tensor(
+                np.load(os.path.join(self.paths["K"], f"{data_id}.npy")),
+                dtype=torch.float32
+            ),
+            "R": torch.tensor(
+                np.load(os.path.join(self.paths["R"], f"{data_id}.npy")),
+                dtype=torch.float32
+            ),
+            "t": torch.tensor(
+                np.load(os.path.join(self.paths["t"], f"{data_id}.npy")),
+                dtype=torch.float32
+            ),
         }
+        
+        if img is not None:
+            sample["img"] = torch.tensor(img) if self.transform is None else img
 
         if self.transform:
             sample = self.transform(sample)
             
-        return idx
-    
-txt = r"C:\Users\Drako\Desktop\Projects\3dhpe_a\data\splits\train.txt"
-data_root = r"C:\Users\Drako\Desktop\Projects\3dhpe_a\data"
-d = SyntheticPoseDataset(data_root=data_root, split_txt=txt)
-
+        return sample
