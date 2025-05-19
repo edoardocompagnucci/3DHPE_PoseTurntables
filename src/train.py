@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 from data.synthetic_pose_dataset import SyntheticPoseDataset
 from models.lifter import MLPLifter
 from utils.losses import mpjpe_loss
+from utils.transforms import NormalizerJoints2d
 
 def main():
     # -------------------------------------------------------------------------
@@ -17,9 +18,10 @@ def main():
     DATA_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "data"))
     CHECKPOINT_ROOT= "checkpoints"
     BATCH_SIZE     = 64
-    LEARNING_RATE  = 1e-3
+    LEARNING_RATE  = 1e-4
     NUM_EPOCHS     = 50
-    NUM_JOINTS     = 16 
+    NUM_JOINTS     = 16
+    IMG_SIZE = 512
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
@@ -27,13 +29,17 @@ def main():
     # -------------------------------------------------------------------------
     # 2) Datasets & Loaders
     # -------------------------------------------------------------------------
+    normalizer = NormalizerJoints2d(img_size=IMG_SIZE)
+
     train_dataset = SyntheticPoseDataset(
         data_root=DATA_ROOT,
-        split_txt=os.path.join(DATA_ROOT, "splits", "train.txt")
+        split_txt=os.path.join(DATA_ROOT, "splits", "train.txt"),
+        transform=normalizer
     )
     val_dataset = SyntheticPoseDataset(
         data_root=DATA_ROOT,
-        split_txt=os.path.join(DATA_ROOT, "splits", "val.txt")
+        split_txt=os.path.join(DATA_ROOT, "splits", "val.txt"),
+        transform=normalizer
     )
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True,
                               num_workers=4, pin_memory=True)
