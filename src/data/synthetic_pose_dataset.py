@@ -20,7 +20,7 @@ class SyntheticPoseDataset(Dataset):
             "K": os.path.join(data_root, "annotations", "K"),
             "R": os.path.join(data_root, "annotations", "R"),
             "t": os.path.join(data_root, "annotations", "t"),
-            "img": os.path.join(data_root, "raw", "rgb")
+            "rgb": os.path.join(data_root, "raw", "rgb")
         }
 
     def __len__(self):
@@ -29,8 +29,8 @@ class SyntheticPoseDataset(Dataset):
     def __getitem__(self, idx):
         data_id = self.data_ids[idx]
 
-        img_path = os.path.join(self.paths["img"], f"{data_id}.png")
-        img = np.array(Image.open(img_path)) if os.path.exists(img_path) else None
+        rgb_path = os.path.join(self.paths["rgb"], f"{data_id}.png")
+        rgb = np.array(Image.open(rgb_path)) if os.path.exists(rgb_path) else None
         
         sample = {
             "joints_2d": torch.tensor(
@@ -57,10 +57,9 @@ class SyntheticPoseDataset(Dataset):
                 np.load(os.path.join(self.paths["t"], f"{data_id}.npy")),
                 dtype=torch.float32
             ),
+            "rgb": torch.tensor(rgb)
         }
         
-        if img is not None:
-            sample["img"] = torch.tensor(img) if self.transform is None else img
 
         if self.transform:
             sample = self.transform(sample)
