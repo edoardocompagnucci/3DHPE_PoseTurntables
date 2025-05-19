@@ -1,165 +1,158 @@
-import torch
-from torch.utils.data import DataLoader
 import os
 from datetime import datetime
+
+import torch
+from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
+
 from data.synthetic_pose_dataset import SyntheticPoseDataset
-from models.lifter import MLPLifter 
+from models.lifter import MLPLifter
 from utils.losses import mpjpe_loss
 
 def main():
-    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+    # -------------------------------------------------------------------------
+    # 1) Config
+    # -------------------------------------------------------------------------
+    SCRIPT_DIR     = os.path.dirname(os.path.abspath(__file__))
     DATA_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "data"))
-
-    BATCH_SIZE = 64
-    LEARNING_RATE = 0.001
-    NUM_EPOCHS = 5
-    NUM_JOINTS = 16
+    CHECKPOINT_ROOT= "checkpoints"
+    BATCH_SIZE     = 64
+    LEARNING_RATE  = 1e-3
+    NUM_EPOCHS     = 50
+    NUM_JOINTS     = 16 
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
+    # -------------------------------------------------------------------------
+    # 2) Datasets & Loaders
+    # -------------------------------------------------------------------------
     train_dataset = SyntheticPoseDataset(
         data_root=DATA_ROOT,
         split_txt=os.path.join(DATA_ROOT, "splits", "train.txt")
     )
-
     val_dataset = SyntheticPoseDataset(
         data_root=DATA_ROOT,
         split_txt=os.path.join(DATA_ROOT, "splits", "val.txt")
     )
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True,
+                              num_workers=4, pin_memory=True)
+    val_loader   = DataLoader(val_dataset,   batch_size=BATCH_SIZE, shuffle=False,
+                              num_workers=4, pin_memory=True)
 
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=BATCH_SIZE,
-        shuffle=True,
-        num_workers=4,
-        pin_memory=True
-    )
-
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=BATCH_SIZE,
-        shuffle=False,
-        num_workers=4,
-        pin_memory=True
-    )
-
-    model = MLPLifter(num_joints=NUM_JOINTS).to(device)
-
+    # -------------------------------------------------------------------------
+    # 3) Model, Optimizer, Scheduler
+    # -------------------------------------------------------------------------
+    model     = MLPLifter(num_joints=NUM_JOINTS).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
-
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=5, verbose=True
+        optimizer, mode="min", factor=0.5, patience=5, verbose=True
     )
 
-    os.makedirs("checkpoints", exist_ok=True)
-    experiment_name = f"mlp_lifter_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    experiment_dir = os.path.join("checkpoints", experiment_name)
+    # -------------------------------------------------------------------------
+    # 4) Checkpoint dir
+    # -------------------------------------------------------------------------
+    os.makedirs(CHECKPOINT_ROOT, exist_ok=True)
+    exp_name       = f"mlp_lifter_{datetime.now():%Y%m%d_%H%M%S}"
+    experiment_dir = os.path.join(CHECKPOINT_ROOT, exp_name)
     os.makedirs(experiment_dir, exist_ok=True)
     print(f"Saving checkpoints to: {experiment_dir}")
 
-    train_losses = []
-    val_losses = []
+    # -------------------------------------------------------------------------
+    # 5) Training loop
+    # -------------------------------------------------------------------------
+    best_val_mpjpe = float("inf")
+    best_state     = None
+    train_losses, val_losses = [], []
 
-    best_val_mpjpe = float('inf')
-    best_model_state = None
-
-    for epoch in range(NUM_EPOCHS):
-
+    for epoch in range(1, NUM_EPOCHS + 1):
+        # ——— Train —————————————————————————————————————————
         model.train()
-        train_loss = 0.0
-        num_train_batches = 0
-        
+        running_loss = 0.0
         for batch in train_loader:
-            
-            inputs_2d = batch["joints_2d"].to(device)
-            targets_3d = batch["joints_3d"].to(device)
-            
-            predictions_3d = model(inputs_2d)
-            
-            loss = mpjpe_loss(predictions_3d, targets_3d)
-            
+            inputs = batch["joints_2d"].to(device)
+            target = batch["joints_3d"].to(device)
+
+            preds = model(inputs)
+            loss  = mpjpe_loss(preds, target)
+
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            
-            train_loss += loss.item()
-            num_train_batches += 1
-        
+            running_loss += loss.item()
+
+        avg_train = running_loss / len(train_loader)
+        train_losses.append(avg_train)
+
+        # ——— Validate ——————————————————————————————————————
         model.eval()
-        val_loss = 0.0
-        num_val_batches = 0
-        
+        running_val = 0.0
         with torch.no_grad():
             for batch in val_loader:
+                inputs = batch["joints_2d"].to(device)
+                target = batch["joints_3d"].to(device)
+                preds  = model(inputs)
+                running_val += mpjpe_loss(preds, target).item()
 
-                inputs_2d = batch["joints_2d"].to(device)
-                targets_3d = batch["joints_3d"].to(device)
-                
-                predictions_3d = model(inputs_2d)
+        avg_val = running_val / len(val_loader)
+        val_losses.append(avg_val)
 
-                loss = mpjpe_loss(predictions_3d, targets_3d)
+        # Convert to millimeters for logging
+        train_mm = avg_train * 1000.0
+        val_mm   = avg_val   * 1000.0
 
-                val_loss += loss.item()
-                num_val_batches += 1
-        
-        avg_train_loss = train_loss / num_train_batches
-        avg_val_loss = val_loss / num_val_batches
+        print(f"Epoch {epoch}/{NUM_EPOCHS}  "
+              f"Train MPJPE: {train_mm:.1f} mm,  "
+              f"Val MPJPE: {val_mm:.1f} mm")
 
-        train_losses.append(avg_train_loss)
-        val_losses.append(avg_val_loss)
-        
-        print(f"Epoch {epoch+1}/{NUM_EPOCHS}, "
-            f"Train MPJPE: {avg_train_loss:.2f} mm, "
-            f"Val MPJPE: {avg_val_loss:.2f} mm")
+        # Scheduler step on meters (raw loss)
+        scheduler.step(avg_val)
 
-        scheduler.step(avg_val_loss)
-        
-        if avg_val_loss < best_val_mpjpe:
-            best_val_mpjpe = avg_val_loss
-            best_model_state = model.state_dict().copy()
-            
-            checkpoint_path = os.path.join(experiment_dir, f"best_model_epoch{epoch+1}_mpjpe{avg_val_loss:.2f}.pth")
+        # Save best
+        if avg_val < best_val_mpjpe:
+            best_val_mpjpe = avg_val
+            best_state     = model.state_dict().copy()
+            ckpt_name = f"best_epoch{epoch:02d}_mpjpe{val_mm:.1f}mm.pth"
+            ckpt_path = os.path.join(experiment_dir, ckpt_name)
             torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'train_loss': avg_train_loss,
-                'val_loss': avg_val_loss,
-            }, checkpoint_path)
-            
-            print(f"New best model with Val MPJPE: {best_val_mpjpe:.2f} mm saved to {checkpoint_path}")
+                "epoch": epoch,
+                "model_state": best_state,
+                "optimizer_state": optimizer.state_dict(),
+                "train_loss_m": avg_train,
+                "val_loss_m":   avg_val,
+            }, ckpt_path)
+            print(f"→ New best model saved: {ckpt_name}")
 
-    model.load_state_dict(best_model_state)
-    print(f"Training complete! Best validation MPJPE: {best_val_mpjpe:.2f} mm")
+    # Load best model for final save
+    model.load_state_dict(best_state)
+    print(f"Training complete!  Best Val MPJPE: {best_val_mpjpe*1000.0:.1f} mm")
 
-    plt.figure(figsize=(10, 6))
-    plt.plot(train_losses, label='Training MPJPE')
-    plt.plot(val_losses, label='Validation MPJPE')
-    plt.xlabel('Epochs')
-    plt.ylabel('MPJPE (mm)')
-    plt.title('Training and Validation MPJPE Over Time')
+    # -------------------------------------------------------------------------
+    # 6) Plot learning curves (in mm)
+    # -------------------------------------------------------------------------
+    plt.figure(figsize=(8,5))
+    plt.plot([l*1000.0 for l in train_losses], label="Train")
+    plt.plot([l*1000.0 for l in val_losses],   label="Val")
+    plt.xlabel("Epoch")
+    plt.ylabel("MPJPE (mm)")
+    plt.title("Learning Curve")
     plt.legend()
     plt.grid(True)
+    curve_path = os.path.join(experiment_dir, "learning_curve.png")
+    plt.savefig(curve_path)
+    print(f"Learning curve → {curve_path}")
 
-    plot_path = os.path.join(experiment_dir, 'learning_curve.png')
-    plt.savefig(plot_path)
-    plt.close()
-    print(f"Learning curve saved to {plot_path}")
-
+    # -------------------------------------------------------------------------
+    # 7) Final checkpoint
+    # -------------------------------------------------------------------------
     final_path = os.path.join(experiment_dir, "final_model.pth")
-
     torch.save({
-        'epoch': NUM_EPOCHS,
-        'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'final_train_loss': avg_train_loss,
-        'final_val_loss': avg_val_loss,
-        'best_val_mpjpe': best_val_mpjpe,
+        "epoch":      NUM_EPOCHS,
+        "model_state": model.state_dict(),
+        "optimizer_state": optimizer.state_dict(),
+        "best_val_m": best_val_mpjpe,
     }, final_path)
-
-    print(f"Final model saved to {final_path}")
+    print(f"Final model → {final_path}")
 
 if __name__ == "__main__":
     main()

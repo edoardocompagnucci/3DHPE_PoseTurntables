@@ -14,4 +14,4 @@ def mpjpe_loss(predicted, target):
     # Calculate Euclidean distance for each joint -> sqrt((x1-x2)² + (y1-y2)² + (z1-z2)²)  
     joint_error = torch.sqrt(torch.sum((pred - targ) ** 2, dim=2))
 
-    return joint_error.mean() * 1000.0
+    return joint_error.mean()
