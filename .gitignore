@@ -1,0 +1,11 @@
+# data & models
+/data/
+/assets/fbx/
+/assets/hdr/
+/src/render/houdini/scenes/backup/
+/src/render/houdini/scenes/geo/
+/checkpoints/
+# Byte‐compiled caches
+**/__pycache__/
+*.py[cod]
+README.md

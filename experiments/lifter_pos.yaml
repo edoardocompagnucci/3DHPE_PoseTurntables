@@ -1,0 +1,26 @@
+# experiments/lifter_pos.yaml
+model:
+  type: "MLPLifter"
+  params:
+    num_joints: 16
+    
+training:
+  learning_rate: 1e-4
+  batch_size: 64
+  num_epochs: 200
+  early_stopping:
+    patience: 10
+    
+data:
+  img_size: 512
+  normalize: true
+  
+optimizer:
+  type: "Adam"
+  
+scheduler:
+  type: "ReduceLROnPlateau"
+  factor: 0.5
+  patience: 5
+  
+loss: "mpjpe"
