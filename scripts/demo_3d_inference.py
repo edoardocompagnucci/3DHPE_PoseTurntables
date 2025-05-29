@@ -1,16 +1,16 @@
 import os, sys, json, cv2, torch, numpy as np, matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+from mpl_toolkits.mplot3d import Axes3D
 from mmpose.apis import MMPoseInferencer
 
-IMAGE_PATH = r"assets\demo_image_synthetic.png"
-CKPT_PATH = r"checkpoints\mlp_lifter_20250528_194024\final_model.pth"
+IMAGE_PATH = r"assets\demo_image.png"
+CKPT_PATH = r"checkpoints\mlp_lifter_regularized_20250529_083604\final_model.pth"
 IMG_SIZE = 512
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
 sys.path.insert(0, PROJECT_ROOT)
 
-from src.models.lifter import MLPLifter
+from src.models.lifter import MLPLifter, MLPLifter_v2
 from src.utils.transforms import NormalizerJoints2d
 
 
@@ -60,7 +60,7 @@ def first_person_keypoints(det_result):
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 pose_detector = MMPoseInferencer(pose2d="rtmpose-m_8xb64-210e_mpii-256x256", device=device.type)
-lifter = MLPLifter(num_joints=24).to(device)
+lifter = MLPLifter_v2(num_joints=24, dropout_rate=0.25).to(device)
 lifter.load_state_dict(torch.load(CKPT_PATH, map_location=device)["model_state"])
 lifter.eval()
 normaliser = NormalizerJoints2d(img_size=IMG_SIZE)
