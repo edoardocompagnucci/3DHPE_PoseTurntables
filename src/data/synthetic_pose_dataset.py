@@ -1,10 +1,17 @@
 import os, json, numpy as np
+import sys
 from PIL import Image
 import torch
 from torch.utils.data import Dataset
 from pathlib import Path
 
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", ".."))
+sys.path.insert(0, PROJECT_ROOT)
+
+from src.utils import rotation_utils
+
 json_path = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "..",  "data", "meta", "joints_mapping.json"))
 
 with open(json_path, "r") as f:
@@ -45,18 +52,24 @@ class SyntheticPoseDataset(Dataset):
                 out[smpl_idx] = kp2d[mpii_idx]
         return out
 
+
     def __getitem__(self, idx):
         did = self.ids[idx]
         load = lambda key: np.load(os.path.join(self.paths[key], f"{did}.npy"))
 
         kp2d_mpii = load("joints_2d")
         kp2d_smpl = self.mpii_to_smpl(kp2d_mpii)
+        
+        rot_mats = load("rot_mats")
+        rot_mats_tensor = torch.tensor(rot_mats, dtype=torch.float32)
+        rot_6d = rotation_utils.rot_matrix_to_6d(rot_mats_tensor)
 
         sample = {
             "joints_2d_mpii": torch.tensor(kp2d_mpii, dtype=torch.float32),
             "joints_2d":      torch.tensor(kp2d_smpl, dtype=torch.float32),
             "joints_3d":      torch.tensor(load("joints_3d"), dtype=torch.float32),
-            "rot_mats":       torch.tensor(load("rot_mats"), dtype=torch.float32),
+            "rot_mats":       rot_mats_tensor,
+            "rot_6d":         rot_6d,
             "K":              torch.tensor(load("K"), dtype=torch.float32),
             "R":              torch.tensor(load("R"), dtype=torch.float32),
             "t":              torch.tensor(load("t"), dtype=torch.float32)
