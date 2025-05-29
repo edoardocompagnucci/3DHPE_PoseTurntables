@@ -2,7 +2,7 @@ import os, sys, json, cv2, torch, numpy as np, matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 from mmpose.apis import MMPoseInferencer
 
-IMAGE_PATH = r"assets\demo_image.png"
+IMAGE_PATH = r"assets\demoimage.jpg"
 CKPT_PATH = r"checkpoints\mlp_lifter_regularized_20250529_083604\final_model.pth"
 IMG_SIZE = 512
 
@@ -80,26 +80,25 @@ with torch.no_grad():
 
 overlay = draw_skeleton(img_bgr.copy(), kp16, cof16, mpii_edges)
 
-fig = plt.figure(figsize=(16, 6))
-plt.subplot(1, 3, 1)
-plt.imshow(cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB))
-plt.title("2-D overlay")
-plt.axis("off")
+fig = plt.figure(figsize=(20, 5))
 
-ax_f = fig.add_subplot(1, 3, 2, projection="3d")
-ax_s = fig.add_subplot(1, 3, 3, projection="3d")
-ax_f.set_title("front view")
-ax_s.set_title("side view")
+# 2-D overlay, cell 1 of a 1×2 grid
+ax_img = fig.add_subplot(1, 2, 1)
+ax_img.imshow(cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB))
+ax_img.set_title("2-D overlay")
+ax_img.axis("off")
+
+# 3-D view, cell 2 of the same 1×2 grid
+ax = fig.add_subplot(1, 2, 2, projection="3d")
+ax.set_title("front view")
 
 X, Y, Z = pose3d[:, 0], pose3d[:, 1], pose3d[:, 2]
-for ax in (ax_f, ax_s):
-    ax.scatter(X, Y, Z, s=20)
-    for p, c in smpl_edges:
-        ax.plot([X[p], X[c]], [Y[p], Y[c]], [Z[p], Z[c]], "b-", lw=2)
-    ax.set_xlabel("X")
-    ax.set_ylabel("Y")
-    ax.set_zlabel("Z")
-ax_f.view_init(elev=5, azim=-85)
-ax_s.view_init(elev=5, azim=5)
-plt.tight_layout()
+ax.scatter(X, Y, Z, s=20)
+for p, c in smpl_edges:
+    ax.plot([X[p], X[c]], [Y[p], Y[c]], [Z[p], Z[c]], "b-", lw=2)
+ax.set_xlabel("X")
+ax.set_ylabel("Y")
+ax.set_zlabel("Z")
+ax.view_init(elev=5, azim=-85)
+
 plt.show()
