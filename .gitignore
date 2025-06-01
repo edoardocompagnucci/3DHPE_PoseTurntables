@@ -1,9 +1,10 @@
 # data & models
 /data/
 /assets/fbx/
-/assets/hdr/
+/assets/demo_images/
 /src/render/houdini/scenes/backup/
 /src/render/houdini/scenes/geo/
 /checkpoints/
+/outputs/
 **/__pycache__/
 *.py[cod]
