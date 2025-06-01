@@ -2,8 +2,8 @@ import os, sys, json, cv2, torch, numpy as np, matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 from mmpose.apis import MMPoseInferencer
 
-IMAGE_PATH = r"assets\demoimage.jpg"
-CKPT_PATH = r"checkpoints\mlp_lifter_regularized_20250529_083604\final_model.pth"
+IMAGE_PATH = r"assets\demo_image.png"
+CKPT_PATH = r"checkpoints\mlp_lifter_rotation_20250529_232201\final_model.pth"
 IMG_SIZE = 512
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -11,6 +11,7 @@ PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
 sys.path.insert(0, PROJECT_ROOT)
 
 from src.models.lifter import MLPLifter, MLPLifter_v2
+from src.models.rot_head import MLPLifterRotationHead
 from src.utils.transforms import NormalizerJoints2d
 
 
@@ -60,7 +61,7 @@ def first_person_keypoints(det_result):
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 pose_detector = MMPoseInferencer(pose2d="rtmpose-m_8xb64-210e_mpii-256x256", device=device.type)
-lifter = MLPLifter_v2(num_joints=24, dropout_rate=0.25).to(device)
+lifter = MLPLifterRotationHead(num_joints=24, dropout_rate=0.25).to(device)
 lifter.load_state_dict(torch.load(CKPT_PATH, map_location=device)["model_state"])
 lifter.eval()
 normaliser = NormalizerJoints2d(img_size=IMG_SIZE)
@@ -76,7 +77,7 @@ kp24, cof24 = pad_mpii_to_smpl(kp16, cof16)
 kp_tensor = torch.from_numpy(kp24).unsqueeze(0)
 kp_norm = normaliser({"joints_2d": kp_tensor})["joints_2d"]
 with torch.no_grad():
-    pose3d = lifter(kp_norm.to(device)).cpu().numpy().reshape(24, 3)
+    pose3d = lifter(kp_norm.to(device))["positions"].cpu().numpy().reshape(24, 3)
 
 overlay = draw_skeleton(img_bgr.copy(), kp16, cof16, mpii_edges)
 
