@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 from data.synthetic_pose_dataset import SyntheticPoseDataset
 from models.lifter import MLPLifter, MLPLifter_v2
 from models.rot_head import MLPLifterRotationHead
-from utils.losses import mpjpe_loss, combined_pose_loss  # CHANGE 2: Add combined loss
+from utils.losses import mpjpe_loss, combined_pose_loss, combined_pose_bone_loss
 from utils.transforms import NormalizerJoints2d
 
 def main():
@@ -20,14 +20,15 @@ def main():
     DROPOUT_RATE = 0.25
     LEARNING_RATE  = 5e-4
     WEIGHT_DECAY   = 1e-4
-    NUM_EPOCHS     = 180
+    NUM_EPOCHS     = 220
     NUM_JOINTS     = 24
     IMG_SIZE = 512
 
     LOSS_POS_WEIGHT = 1.0
     LOSS_ROT_WEIGHT = 0.1
+    LOSS_BONE_WEIGHT = 0.05
 
-    early_stopping_patience = 15
+    early_stopping_patience = 25
     early_stopping_counter = 0
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -36,14 +37,20 @@ def main():
     normalizer = NormalizerJoints2d(img_size=IMG_SIZE)
 
     train_dataset = SyntheticPoseDataset(
-        data_root=DATA_ROOT,
-        split_txt=os.path.join(DATA_ROOT, "splits", "train.txt"),
-        transform=normalizer
-    )
+            data_root=DATA_ROOT,
+            split_txt=os.path.join(DATA_ROOT, "splits", "train.txt"),
+            transform=normalizer,
+            augment_2d=True,
+            noise_std=0.025,
+            dropout_prob=0.12,
+            confidence_noise=0.02,
+            max_shift=0.03
+        )
     val_dataset = SyntheticPoseDataset(
         data_root=DATA_ROOT,
         split_txt=os.path.join(DATA_ROOT, "splits", "val.txt"),
-        transform=normalizer
+        transform=normalizer,
+        augment_2d=False
     )
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True,
                               num_workers=4, pin_memory=True)
@@ -68,6 +75,7 @@ def main():
     best_state     = None
     train_losses, val_losses = [], []
     train_rot_losses, val_rot_losses = [], []
+    train_bone_losses, val_bone_losses = [], []
 
     for epoch in range(1, NUM_EPOCHS + 1):
 
@@ -75,6 +83,7 @@ def main():
         running_loss = 0.0
         running_pos_loss = 0.0
         running_rot_loss = 0.0
+        running_bone_loss = 0.0
         
         for batch in train_loader:
             inputs = batch["joints_2d"].to(device)
@@ -92,7 +101,11 @@ def main():
                 'rotations': target_rot.flatten(1)
             }
             
-            loss_dict = combined_pose_loss(pred_dict, target_dict, pos_weight=LOSS_POS_WEIGHT, rot_weight=LOSS_ROT_WEIGHT)
+            loss_dict = combined_pose_bone_loss(pred_dict, target_dict, 
+                                pos_weight=LOSS_POS_WEIGHT, 
+                                rot_weight=LOSS_ROT_WEIGHT,
+                                bone_weight=LOSS_BONE_WEIGHT)
+            
             loss = loss_dict['total']
 
             optimizer.zero_grad()
@@ -103,18 +116,22 @@ def main():
             running_loss += loss.item()
             running_pos_loss += loss_dict['position'].item()
             running_rot_loss += loss_dict['rotation'].item()
+            running_bone_loss += loss_dict['bone'].item()
 
         avg_train = running_loss / len(train_loader)
         avg_train_pos = running_pos_loss / len(train_loader)
         avg_train_rot = running_rot_loss / len(train_loader)
+        avg_train_bone = running_bone_loss / len(train_loader)
         
         train_losses.append(avg_train)
         train_rot_losses.append(avg_train_rot)
+        train_bone_losses.append(avg_train_bone)
 
         model.eval()
         running_val = 0.0
         running_val_pos = 0.0
         running_val_rot = 0.0
+        running_val_bone = 0.0
         
         with torch.no_grad():
             for batch in val_loader:
@@ -133,29 +150,37 @@ def main():
                     'rotations': target_rot.flatten(1)
                 }
                 
-                loss_dict = combined_pose_loss(pred_dict, target_dict, pos_weight=LOSS_POS_WEIGHT, rot_weight=LOSS_ROT_WEIGHT)
+                loss_dict = combined_pose_bone_loss(pred_dict, target_dict, 
+                                  pos_weight=LOSS_POS_WEIGHT, 
+                                  rot_weight=LOSS_ROT_WEIGHT,
+                                  bone_weight=LOSS_BONE_WEIGHT)
                 
                 running_val += loss_dict['total'].item()
                 running_val_pos += loss_dict['position'].item()
                 running_val_rot += loss_dict['rotation'].item()
+                running_val_bone += loss_dict['bone'].item()
 
         avg_val = running_val / len(val_loader)
         avg_val_pos = running_val_pos / len(val_loader)
         avg_val_rot = running_val_rot / len(val_loader)
+        avg_val_bone = running_val_bone / len(val_loader)
         
         val_losses.append(avg_val)
         val_rot_losses.append(avg_val_rot)
+        val_bone_losses.append(avg_val_bone)
 
         train_mm = avg_train_pos * 1000.0
         val_mm   = avg_val_pos * 1000.0
         rot_train = avg_train_rot
         rot_val = avg_val_rot
+        bone_train = avg_train_bone
+        bone_val = avg_val_bone
 
         current_lr = optimizer.param_groups[0]['lr']
 
         print(f"Epoch {epoch}/{NUM_EPOCHS}")
-        print(f"  Train - Pos MPJPE: {train_mm:.1f} mm, Rot Loss: {rot_train:.4f}")
-        print(f"  Val   - Pos MPJPE: {val_mm:.1f} mm, Rot Loss: {rot_val:.4f}")
+        print(f"  Train - Pos: {train_mm:.1f}mm, Rot: {rot_train:.4f}, Bone: {bone_train:.4f}")
+        print(f"  Val   - Pos: {val_mm:.1f}mm, Rot: {rot_val:.4f}, Bone: {bone_val:.4f}")
         print(f"  LR: {current_lr:.6f}")
 
         scheduler.step(avg_val_pos)
@@ -175,7 +200,7 @@ def main():
     model.load_state_dict(best_state)
     print(f"Training complete! Best Val MPJPE: {best_val_mpjpe*1000.0:.1f} mm")
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(20, 6))
 
     ax1.plot([l*1000.0 for l in [loss['position'] if isinstance(loss, dict) else loss for loss in train_losses]], 
              label="Train MPJPE", alpha=0.8)
@@ -194,6 +219,14 @@ def main():
     ax2.set_title("Rotation Loss")
     ax2.legend()
     ax2.grid(True, alpha=0.3)
+
+    ax3.plot(train_bone_losses, label="Train Bone Loss", alpha=0.8)
+    ax3.plot(val_bone_losses, label="Val Bone Loss", alpha=0.8)
+    ax3.set_xlabel("Epoch")
+    ax3.set_ylabel("Bone Length Loss")
+    ax3.set_title("Bone Consistency Loss")
+    ax3.legend()
+    ax3.grid(True, alpha=0.3)
     
     plt.tight_layout()
     curve_path = os.path.join(experiment_dir, "learning_curves.png")
@@ -207,13 +240,15 @@ def main():
         "optimizer_state": optimizer.state_dict(),
         "best_val_mpjpe": best_val_mpjpe,
         "best_val_rot_loss": avg_val_rot,
+        "best_val_bone_loss": avg_val_bone,
         "hyperparameters": {
             "batch_size": BATCH_SIZE,
             "learning_rate": LEARNING_RATE,
             "weight_decay": WEIGHT_DECAY,
             "dropout_rate": DROPOUT_RATE,
             "pos_weight": LOSS_POS_WEIGHT,
-            "rot_weight": LOSS_ROT_WEIGHT
+            "rot_weight": LOSS_ROT_WEIGHT,
+            "bone_weight": LOSS_BONE_WEIGHT
         }
     }, final_path)
     print(f"Final model → {final_path}")

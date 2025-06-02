@@ -2,11 +2,11 @@ import os, sys, json, cv2, torch, numpy as np, matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 from mmpose.apis import MMPoseInferencer
 
-IMAGE_PATH = r"assets\demo_images\image_00059.jpg"
-CKPT_PATH = r"checkpoints\mlp_lifter_rotation_20250529_232201\final_model.pth"
+IMAGE_PATH = r"assets\demo_images\SMPL_Body_24_camera300_pos0.png"
+CKPT_PATH = r"checkpoints\mlp_lifter_rotation_20250602_214417\final_model.pth"
 IMG_SIZE = 512
-SAVE_RESULTS = False
-OUTPUT_DIR = "outputs/week6_test"
+SAVE_RESULTS = True
+OUTPUT_DIR = "outputs/inference"
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
@@ -27,7 +27,68 @@ mpii_edges = joint_map["mpii_edges"]
 joint_names = joint_map["smpl_names"]
 
 # ============================================================================
-# ADDED: Proper aspect ratio preservation
+# BONE LENGTH CORRECTION FUNCTIONS
+# ============================================================================
+def load_bone_lengths():
+    """Load standard bone lengths from .npy file"""
+    bone_lengths_path = os.path.join(PROJECT_ROOT, "data/meta/bone_lengths.npy")
+    try:
+        bone_lengths = np.load(bone_lengths_path)
+        print(f"Loaded {len(bone_lengths)} standard bone lengths")
+        return bone_lengths
+    except:
+        print("Using default bone lengths (file not found)")
+        # Default lengths for 23 SMPL edges (in meters)
+        return np.array([
+            0.10, 0.40, 0.12, 0.40, 0.10, 0.40, 0.43, 0.43, 0.12, 0.10, 
+            0.08, 0.06, 0.15, 0.18, 0.15, 0.18, 0.30, 0.25, 0.18, 0.30, 
+            0.25, 0.08, 0.08
+        ])
+
+def fix_bone_lengths(pose3d, target_lengths, edges, iterations=3):
+    """Fix bone lengths to match target lengths"""
+    pose_fixed = pose3d.copy()
+    
+    for _ in range(iterations):
+        for i, (parent_idx, child_idx) in enumerate(edges):
+            if i >= len(target_lengths) or parent_idx >= 24 or child_idx >= 24:
+                continue
+                
+            # Current bone vector
+            bone = pose_fixed[child_idx] - pose_fixed[parent_idx]
+            current_length = np.linalg.norm(bone)
+            target_length = target_lengths[i]
+            
+            if current_length > 1e-6:
+                # Scale to target length
+                bone_direction = bone / current_length
+                pose_fixed[child_idx] = pose_fixed[parent_idx] + bone_direction * target_length
+    
+    # Keep pelvis position fixed
+    pelvis_offset = pose_fixed[0] - pose3d[0]
+    pose_fixed -= pelvis_offset
+    
+    return pose_fixed
+
+def calculate_bone_length_error(pose3d, target_lengths, edges):
+    """Calculate average bone length error percentage"""
+    errors = []
+    for i, (parent_idx, child_idx) in enumerate(edges):
+        if i >= len(target_lengths) or parent_idx >= 24 or child_idx >= 24:
+            continue
+            
+        bone = pose3d[child_idx] - pose3d[parent_idx]
+        current_length = np.linalg.norm(bone)
+        target_length = target_lengths[i]
+        
+        if target_length > 0:
+            error = abs(current_length - target_length) / target_length * 100
+            errors.append(error)
+    
+    return np.mean(errors) if errors else 0.0
+
+# ============================================================================
+# EXISTING FUNCTIONS
 # ============================================================================
 def preprocess_image_proper(image_path, target_size=512):
     """
@@ -133,8 +194,8 @@ def analyze_rotations(rotations):
     orth_errors = []
     
     # FIXED: Proper validation thresholds
-    det_threshold = 1e-3  # Very tight but reasonable
-    orth_threshold = 1e-3  # Very tight but reasonable
+    det_threshold = 1e-4  # Relaxed threshold
+    orth_threshold = 1e-4  # Relaxed threshold
     
     for i, rot_mat in enumerate(rot_matrices):
         det = np.linalg.det(rot_mat)
@@ -157,8 +218,8 @@ def analyze_rotations(rotations):
     return issues, status
 
 def run_inference():
-    print(f"Week 6 Real-World Testing (FIXED with Aspect Ratio)")
-    print("="*50)
+    print(f"Week 6 Real-World Testing (With Bone Length Correction)")
+    print("="*60)
     
     # Setup device and models
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -186,7 +247,10 @@ def run_inference():
     pose_detector = MMPoseInferencer(pose2d="rtmpose-m_8xb64-210e_mpii-256x256", device=device.type)
     normalizer = NormalizerJoints2d(img_size=IMG_SIZE)
     
-    # FIXED: Load and process image with proper aspect ratio preservation
+    # Load standard bone lengths
+    standard_bone_lengths = load_bone_lengths()
+    
+    # Load and process image with proper aspect ratio preservation
     print(f"Processing: {IMAGE_PATH}")
     img_bgr, preprocessing_info = preprocess_image_proper(IMAGE_PATH, IMG_SIZE)
     
@@ -214,16 +278,28 @@ def run_inference():
         # Handle different model outputs
         if isinstance(model_output, dict):
             # Rotation head model
-            pose3d = model_output["positions"].cpu().numpy().reshape(24, 3)
+            pose3d_raw = model_output["positions"].cpu().numpy().reshape(24, 3)
             rotations = model_output["rotations"].cpu().numpy() if "rotations" in model_output else None
             model_type = "Rotation Head"
         else:
             # Legacy model
-            pose3d = model_output.cpu().numpy().reshape(24, 3)
+            pose3d_raw = model_output.cpu().numpy().reshape(24, 3)
             rotations = None
             model_type = "Position Only"
     
     print(f"Model type: {model_type}")
+    
+    # Apply bone length correction
+    print("Applying bone length correction...")
+    original_error = calculate_bone_length_error(pose3d_raw, standard_bone_lengths, smpl_edges)
+    pose3d_corrected = fix_bone_lengths(pose3d_raw, standard_bone_lengths, smpl_edges)
+    corrected_error = calculate_bone_length_error(pose3d_corrected, standard_bone_lengths, smpl_edges)
+    improvement = original_error - corrected_error
+    
+    print(f"Bone length error: {original_error:.1f}% -> {corrected_error:.1f}% (improved by {improvement:.1f}%)")
+    
+    # Use corrected pose
+    pose3d = pose3d_corrected
     
     # Analyze results
     print("Analyzing quality...")
@@ -235,6 +311,7 @@ def run_inference():
     print(f"  Scale factor: {preprocessing_info['scale_factor']:.3f}")
     print(f"  2D Detection: {cof16.mean():.3f} confidence")
     print(f"  Visible joints: {(cof16 > 0.3).sum()}/16")
+    print(f"  Bone length improvement: {improvement:.1f}%")
     print(f"  Rotation status: {rotation_status}")
     print(f"  Issues found: {len(rotation_issues)}")
     
@@ -245,53 +322,58 @@ def run_inference():
     
     # Quality assessment
     detection_good = cof16.mean() > 0.5
-    rotation_good = len(rotation_issues) < 3  # Very strict criteria
+    rotation_good = len(rotation_issues) < 3
+    bone_length_good = improvement > 3.0  # At least 3% improvement
     
-    if detection_good and rotation_good:
+    if detection_good and rotation_good and bone_length_good:
         assessment = "EXCELLENT"
         print(f"  WEEK 6 STATUS: {assessment} - Ready for benchmarking!")
-    elif detection_good or rotation_good:
+    elif (detection_good and rotation_good) or (detection_good and bone_length_good):
         assessment = "GOOD"
         print(f"  WEEK 6 STATUS: {assessment} - Minor improvements possible")
     else:
         assessment = "FAIR"
         print(f"  WEEK 6 STATUS: {assessment} - Some domain gap exists")
     
-    # Create visualization (simplified, no emojis)
-    create_clean_visualization(img_bgr, kp16, cof16, pose3d, rotations, rotation_issues, assessment, preprocessing_info)
+    # Create visualization
+    create_visualization(img_bgr, kp16, cof16, pose3d_raw, pose3d, rotations, 
+                        rotation_issues, assessment, preprocessing_info, improvement)
     
     # Save results if requested
     if SAVE_RESULTS:
-        save_results(pose3d, rotations, cof16, rotation_issues, rotation_status, assessment, preprocessing_info)
+        save_results(pose3d_raw, pose3d, rotations, cof16, rotation_issues, 
+                    rotation_status, assessment, preprocessing_info, improvement)
 
-def create_clean_visualization(img_bgr, kp16, cof16, pose3d, rotations, issues, assessment, preprocessing_info):
-    """Clean visualization without emoji characters"""
+def create_visualization(img_bgr, kp16, cof16, pose3d_raw, pose3d_corrected, rotations, 
+                        issues, assessment, preprocessing_info, improvement):
+    """Create visualization with bone length correction"""
     fig = plt.figure(figsize=(15, 8))
     
     # 2D overlay
     plt.subplot(2, 3, 1)
     overlay = draw_skeleton(img_bgr.copy(), kp16, cof16, mpii_edges)
     plt.imshow(cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB))
-    title_text = f"2D Detection (Processed)\nConf: {cof16.mean():.3f}\nScale: {preprocessing_info['scale_factor']:.3f}"
+    title_text = f"2D Detection\nConf: {cof16.mean():.3f}\nScale: {preprocessing_info['scale_factor']:.3f}"
     plt.title(title_text)
     plt.axis("off")
     
-    # 3D pose - front view
+    # 3D pose - RAW
     ax1 = fig.add_subplot(2, 3, 2, projection='3d')
-    X, Y, Z = pose3d[:, 0], pose3d[:, 1], pose3d[:, 2]
-    ax1.scatter(X, Y, Z, s=30, c='red')
+    X_raw, Y_raw, Z_raw = pose3d_raw[:, 0], pose3d_raw[:, 1], pose3d_raw[:, 2]
+    ax1.scatter(X_raw, Y_raw, Z_raw, s=30, c='red', alpha=0.7)
     for p, c in smpl_edges:
-        ax1.plot([X[p], X[c]], [Y[p], Y[c]], [Z[p], Z[c]], "b-", lw=2)
-    ax1.set_title("3D Pose - Front")
+        ax1.plot([X_raw[p], X_raw[c]], [Y_raw[p], Y_raw[c]], [Z_raw[p], Z_raw[c]], "r-", lw=2, alpha=0.7)
+    ax1.set_title("3D Pose - Raw")
     ax1.view_init(elev=5, azim=-85)
     
-    # 3D pose - side view
+    # 3D pose - CORRECTED
     ax2 = fig.add_subplot(2, 3, 3, projection='3d')
-    ax2.scatter(X, Y, Z, s=30, c='red')
+    X_corr, Y_corr, Z_corr = pose3d_corrected[:, 0], pose3d_corrected[:, 1], pose3d_corrected[:, 2]
+    ax2.scatter(X_corr, Y_corr, Z_corr, s=30, c='blue')
     for p, c in smpl_edges:
-        ax2.plot([X[p], X[c]], [Y[p], Y[c]], [Z[p], Z[c]], "b-", lw=2)
-    ax2.set_title("3D Pose - Side")
-    ax2.view_init(elev=5, azim=5)
+        ax2.plot([X_corr[p], X_corr[c]], [Y_corr[p], Y_corr[c]], [Z_corr[p], Z_corr[c]], "b-", lw=2)
+    ax2.set_title("3D Pose - Bone Corrected")
+    ax2.view_init(elev=5, azim=-85)
     
     # Confidence histogram
     plt.subplot(2, 3, 4)
@@ -305,12 +387,10 @@ def create_clean_visualization(img_bgr, kp16, cof16, pose3d, rotations, issues, 
     # Rotation analysis
     plt.subplot(2, 3, 5)
     if rotations is not None:
-        # Convert to matrices for analysis
         rot_6d = rotations.reshape(-1, 6)
         rot_6d_tensor = torch.tensor(rot_6d, dtype=torch.float32)
         rot_matrices = rotation_utils.rot_6d_to_matrix(rot_6d_tensor).numpy()
         
-        # Show determinants
         determinants = [np.linalg.det(mat) for mat in rot_matrices]
         plt.bar(range(24), determinants, alpha=0.7)
         plt.axhline(1.0, color='red', linestyle='--', label='Perfect (1.0)')
@@ -318,13 +398,13 @@ def create_clean_visualization(img_bgr, kp16, cof16, pose3d, rotations, issues, 
         plt.xlabel('Joint Index')
         plt.ylabel('Determinant')
         plt.legend()
-        plt.ylim(0.98, 1.02)  # Zoom in to see small variations
+        plt.ylim(0.98, 1.02)
     else:
         plt.text(0.5, 0.5, 'No Rotation Data\n(Position-Only Model)', 
                 ha='center', va='center', transform=plt.gca().transAxes)
         plt.title('Rotations: N/A')
     
-    # Week 6 Summary
+    # Summary
     plt.subplot(2, 3, 6)
     plt.axis('off')
     summary_text = f"WEEK 6 ASSESSMENT:\n\n"
@@ -332,17 +412,18 @@ def create_clean_visualization(img_bgr, kp16, cof16, pose3d, rotations, issues, 
     summary_text += f"Scale factor: {preprocessing_info['scale_factor']:.3f}\n"
     summary_text += f"2D Detection: {cof16.mean():.3f}\n"
     summary_text += f"Visible joints: {(cof16 > 0.3).sum()}/16\n"
+    summary_text += f"Bone improvement: {improvement:.1f}%\n"
     summary_text += f"Rotation issues: {len(issues)}\n\n"
     summary_text += f"STATUS: {assessment}\n\n"
     
     if assessment == "EXCELLENT":
-        summary_text += "Ready for benchmarking!\nAspect ratio preserved!"
+        summary_text += "Ready for benchmarking!\nBone lengths corrected!"
         color = "lightgreen"
     elif assessment == "GOOD":
-        summary_text += "Very promising results!\nAspect ratio fixed."
+        summary_text += "Very promising results!\nBone correction applied."
         color = "lightblue"
     else:
-        summary_text += "Some domain gap exists.\nBut aspect ratio OK."
+        summary_text += "Some improvements made.\nBone correction helps."
         color = "lightyellow"
     
     plt.text(0.1, 0.9, summary_text, transform=plt.gca().transAxes, 
@@ -354,13 +435,14 @@ def create_clean_visualization(img_bgr, kp16, cof16, pose3d, rotations, issues, 
     
     if SAVE_RESULTS:
         os.makedirs(OUTPUT_DIR, exist_ok=True)
-        plt.savefig(os.path.join(OUTPUT_DIR, "week6_analysis_aspect_fixed.png"), dpi=150, bbox_inches='tight')
-        print(f"Visualization saved to {OUTPUT_DIR}/week6_analysis_aspect_fixed.png")
+        plt.savefig(os.path.join(OUTPUT_DIR, "inference_joints.png"), dpi=150, bbox_inches='tight')
+        print(f"Visualization saved to {OUTPUT_DIR}/week6_analysis_bone_corrected.png")
     
     plt.show()
 
-def save_results(pose3d, rotations, cof16, issues, rotation_status, assessment, preprocessing_info):
-    """Save numerical results"""
+def save_results(pose3d_raw, pose3d_corrected, rotations, cof16, issues, 
+                rotation_status, assessment, preprocessing_info, improvement):
+    """Save results including bone length correction"""
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     
     # Convert rotations to both formats for completeness
@@ -373,8 +455,10 @@ def save_results(pose3d, rotations, cof16, issues, rotation_status, assessment, 
     results = {
         "image_path": IMAGE_PATH,
         "model_path": CKPT_PATH,
-        "preprocessing_info": preprocessing_info,  # ADDED: Include preprocessing details
-        "pose_3d": pose3d.tolist(),
+        "preprocessing_info": preprocessing_info,
+        "pose_3d_raw": pose3d_raw.tolist(),
+        "pose_3d_bone_corrected": pose3d_corrected.tolist(),
+        "bone_length_improvement": float(improvement),
         "rotations_6d": rotations.tolist() if rotations is not None else None,
         "rotations_3x3": rotation_matrices.tolist() if rotation_matrices is not None else None,
         "detection_confidence": {
@@ -391,13 +475,13 @@ def save_results(pose3d, rotations, cof16, issues, rotation_status, assessment, 
             "overall_status": assessment,
             "detection_quality": "excellent" if cof16.mean() > 0.6 else "good" if cof16.mean() > 0.4 else "fair",
             "rotation_quality": "excellent" if len(issues) == 0 else "good" if len(issues) < 3 else "fair",
+            "bone_length_quality": "excellent" if improvement > 5 else "good" if improvement > 2 else "fair",
             "ready_for_benchmarking": assessment in ["EXCELLENT", "GOOD"],
-            "synthetic_to_real_transfer": "working" if len(issues) < 5 else "needs_improvement",
-            "aspect_ratio_preserved": True  # ADDED: Flag that aspect ratio was preserved
+            "anatomical_realism": "improved" if improvement > 0 else "unchanged"
         }
     }
     
-    output_file = os.path.join(OUTPUT_DIR, "week6_results_aspect_fixed.json")
+    output_file = os.path.join(OUTPUT_DIR, "inference_joints.json")
     with open(output_file, 'w') as f:
         json.dump(results, f, indent=2)
     
