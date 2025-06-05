@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
-MODEL_PATH = r"checkpoints\mlp_lifter_rotation_20250529_232201\final_model.pth"
+MODEL_PATH = r"checkpoints\mlp_lifter_rotation_20250605_165330\final_model.pth"
 DATA_ROOT = os.path.join(PROJECT_ROOT, "data")
 BATCH_SIZE = 64
 sys.path.insert(0, PROJECT_ROOT)
@@ -85,9 +85,7 @@ def evaluate_pose_and_rotation():
             target_rot = batch["rot_6d"].to(device)
             
             # Forward pass
-            outputs = model(inputs)
-            pred_pos = outputs['positions']  # (B, 72)
-            pred_rot = outputs['rotations']  # (B, 144)
+            pred_pos, pred_rot = model(inputs)
             
             # Position errors (MPJPE)
             batch_size = inputs.size(0)

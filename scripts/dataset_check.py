@@ -5,7 +5,7 @@ import os
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "data"))
-FRAME_ID  = "SMPL_Body_24_camera300_pos4"
+FRAME_ID  = "SMPL_Body_24_Index197"
 
 paths = {
     "rgb": os.path.join(DATA_ROOT, "raw", "rgb",          f"{FRAME_ID}.png"),

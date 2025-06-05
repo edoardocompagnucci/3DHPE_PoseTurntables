@@ -30,3 +30,18 @@ def rot_6d_to_matrix(rot_6d):
     rot_matrix = torch.stack([b1, b2, b3], dim=-1)
     return rot_matrix.reshape(*batch_shape, 3, 3)
 
+def flip_rotations_xy(rotations):
+    rot_6d = rotations.reshape(-1, 6)
+    rot_6d_tensor = torch.tensor(rot_6d, dtype=torch.float32)
+    rot_matrices = rot_6d_to_matrix(rot_6d_tensor).numpy()
+
+    transform_matrix = np.array([
+        [-1,  0,  0],
+        [ 0, -1,  0],
+        [ 0,  0,  1]
+    ], dtype=np.float32)
+
+    for i in range(rot_matrices.shape[0]):
+        rot_matrices[i] = transform_matrix @ rot_matrices[i] @ transform_matrix.T
+    
+    return rot_matrices
