@@ -40,6 +40,8 @@ def main():
         split_txt=os.path.join(DATA_ROOT, "splits", "train.txt"),
         transform=normalizer,
         augment_2d=True,
+        camera_aug_rotation_deg=8.0,
+        camera_aug_translation_m=0.02
     )
     val_dataset = SyntheticPoseDataset(
         data_root=DATA_ROOT,

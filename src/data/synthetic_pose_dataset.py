@@ -11,6 +11,7 @@ PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", ".."))
 sys.path.insert(0, PROJECT_ROOT)
 
 from src.utils import rotation_utils
+from src.utils.camera_augmentation import CameraViewpointAugmenter
 
 json_path = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "..", "data", "meta", "joints_mapping.json"))
 with open(json_path, "r") as f:
@@ -23,15 +24,15 @@ class SyntheticPoseDataset(Dataset):
     def __init__(self, data_root, split_txt, transform=None, 
                  augment_2d=False,
                  noise_std=0.02,
-                 dropout_prob=0.05, 
                  confidence_noise=0.005,
-                 max_shift=0.005):
+                 max_shift=0.005,
+                 camera_aug_rotation_deg=10.0,
+                 camera_aug_translation_m=0.05):
         
         self.root = data_root
         self.transform = transform
         self.augment_2d = augment_2d
         self.noise_std = noise_std
-        self.dropout_prob = dropout_prob
         self.confidence_noise = confidence_noise
         self.max_shift = max_shift
  
@@ -41,6 +42,7 @@ class SyntheticPoseDataset(Dataset):
             self.ids = [ln.strip() for ln in f if ln.strip()]
 
         j = lambda *p: os.path.join(data_root, *p)
+
         self.paths = dict(
             joints_2d=j("annotations", "joints_2d"),
             joints_3d=j("annotations", "joints_3d"),
@@ -51,6 +53,10 @@ class SyntheticPoseDataset(Dataset):
             rgb=j("raw", "rgb")
         )
 
+        self.camera_augmenter = CameraViewpointAugmenter(
+            max_rotation_deg=camera_aug_rotation_deg,
+            max_translation_m=camera_aug_translation_m
+        )
     def __len__(self):
         return len(self.ids)
 
@@ -114,20 +120,30 @@ class SyntheticPoseDataset(Dataset):
         did = self.ids[idx]
         load = lambda key: np.load(os.path.join(self.paths[key], f"{did}.npy"))
 
-        kp2d_mpii = load("joints_2d")
+        kp2d_mpii = load("joints_2d")  # Original stored 2D keypoints
         joints_2d_mpii = torch.tensor(kp2d_mpii, dtype=torch.float32)
+        
+        joints_3d = torch.tensor(load("joints_3d"), dtype=torch.float32)
+        K = torch.tensor(load("K"), dtype=torch.float32)
+        R = torch.tensor(load("R"), dtype=torch.float32)
+        t = torch.tensor(load("t"), dtype=torch.float32)
 
         if self.augment_2d:
-            joints_2d_mpii = self.augment_2d_keypoints_pixel_space(joints_2d_mpii)
+            # 50% chance to use camera augmentation, 50% chance to keep original
+            if np.random.random() < 0.5:
+                augmented_2d_mpii = self.camera_augmenter.augment_viewpoint(
+                    joints_3d, K, R, t
+                )
+                if augmented_2d_mpii is not None:
+                    joints_2d_mpii = augmented_2d_mpii
+            #joints_2d_mpii = self.augment_2d_keypoints_pixel_space(joints_2d_mpii)
+            # Otherwise keep original stored 2D keypoints (joints_2d_mpii unchanged)
         
         kp2d_smpl = torch.tensor(self.mpii_to_smpl(joints_2d_mpii.numpy()), dtype=torch.float32)
-
-        joints_3d = torch.tensor(load("joints_3d"), dtype=torch.float32)
 
         rot_mats = load("rot_mats")
         rot_mats_tensor = torch.tensor(rot_mats, dtype=torch.float32)
         rot_6d = rotation_utils.rot_matrix_to_6d(rot_mats_tensor)
-
 
         sample = {
             "joints_2d_mpii": joints_2d_mpii,
@@ -135,9 +151,9 @@ class SyntheticPoseDataset(Dataset):
             "joints_3d": joints_3d,
             "rot_mats": rot_mats_tensor,
             "rot_6d": rot_6d,
-            "K": torch.tensor(load("K"), dtype=torch.float32),
-            "R": torch.tensor(load("R"), dtype=torch.float32),
-            "t": torch.tensor(load("t"), dtype=torch.float32)
+            "K": K,
+            "R": R,
+            "t": t
         }
 
         rgb_path = os.path.join(self.paths["rgb"], f"{did}.png")
