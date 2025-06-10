@@ -57,26 +57,26 @@ def main():
     model = MLPLifterRotationHead(num_joints=NUM_JOINTS, dropout=DROPOUT_RATE).to(device)
     
     # Create learnable PoseAug module
-    poseaug_module = DifferentiablePoseAug(
-        initial_max_rotation_deg=POSEAUG_INITIAL_ROTATION_DEG,
-        initial_max_translation_m=POSEAUG_INITIAL_TRANSLATION_M,
-        augmentation_prob=0.5
-    ).to(device)
+    #poseaug_module = DifferentiablePoseAug(
+    #    initial_max_rotation_deg=POSEAUG_INITIAL_ROTATION_DEG,
+    #    initial_max_translation_m=POSEAUG_INITIAL_TRANSLATION_M,
+    #    augmentation_prob=0.5
+    #).to(device)
     
     # Wrap PoseAug for easy integration with training loop
-    poseaug_wrapper = PoseAugWrapper(poseaug_module, img_size=IMG_SIZE).to(device)
+    #poseaug_wrapper = PoseAugWrapper(poseaug_module, img_size=IMG_SIZE).to(device)
     
     # Create optimizers - separate for model and PoseAug parameters
     model_optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
-    poseaug_optimizer = torch.optim.Adam(poseaug_module.parameters(), lr=POSEAUG_LR, weight_decay=WEIGHT_DECAY * 0.1)
+    #poseaug_optimizer = torch.optim.Adam(poseaug_module.parameters(), lr=POSEAUG_LR, weight_decay=WEIGHT_DECAY * 0.1)
     
     # Schedulers
     model_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         model_optimizer, mode="min", factor=0.5, patience=2, verbose=True
     )
-    poseaug_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        poseaug_optimizer, mode="min", factor=0.7, patience=3, verbose=False
-    )
+    #poseaug_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    #    poseaug_optimizer, mode="min", factor=0.7, patience=3, verbose=False
+    #)
 
     os.makedirs(CHECKPOINT_ROOT, exist_ok=True)
     exp_name       = f"mlp_lifter_rotation_poseaug_{datetime.now():%Y%m%d_%H%M%S}"
@@ -85,10 +85,10 @@ def main():
     print(f"Saving checkpoints to: {experiment_dir}")
     
     # Print initial PoseAug parameters
-    initial_stats = poseaug_module.get_augmentation_stats()
-    print(f"Initial PoseAug parameters:")
-    print(f"  Max rotation: {initial_stats['max_rotation_deg']:.1f}°")
-    print(f"  Max translation: {initial_stats['max_translation_m']:.3f}m")
+    #initial_stats = poseaug_module.get_augmentation_stats()
+    #print(f"Initial PoseAug parameters:")
+    #print(f"  Max rotation: {initial_stats['max_rotation_deg']:.1f}°")
+    #print(f"  Max translation: {initial_stats['max_translation_m']:.3f}m")
 
     best_val_mpjpe = float("inf")
     best_state     = None
@@ -103,7 +103,7 @@ def main():
             
         # Training phase
         model.train()
-        poseaug_wrapper.train()
+        #poseaug_wrapper.train()
         running_loss = 0.0
         running_pos_loss = 0.0
         running_rot_loss = 0.0
@@ -122,10 +122,10 @@ def main():
             t = batch["t"].to(device)  # (B, 3)
 
             # Apply learnable PoseAug to augment 2D keypoints
-            augmented_inputs = poseaug_wrapper(
-                inputs, joints_3d_world, K, R, t, training=True
-            )
-
+            #augmented_inputs = poseaug_wrapper(
+            #    inputs, joints_3d_world, K, R, t, training=True
+            #)
+            augmented_inputs = inputs
             # Forward pass through main model with augmented inputs
             pos3d, rot6d = model(augmented_inputs)
 
@@ -147,15 +147,15 @@ def main():
 
             # Backward pass and optimization
             model_optimizer.zero_grad()
-            poseaug_optimizer.zero_grad()
+            #poseaug_optimizer.zero_grad()
             loss.backward()
             
             # Gradient clipping
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            torch.nn.utils.clip_grad_norm_(poseaug_module.parameters(), max_norm=0.5)
+            #torch.nn.utils.clip_grad_norm_(poseaug_module.parameters(), max_norm=0.5)
             
             model_optimizer.step()
-            poseaug_optimizer.step()
+            #poseaug_optimizer.step()
             
             running_loss += loss.item()
             running_pos_loss += loss_dict['position'].item()
@@ -173,7 +173,7 @@ def main():
 
         # Validation phase
         model.eval()
-        poseaug_wrapper.eval()
+        #poseaug_wrapper.eval()
         running_val = 0.0
         running_val_pos = 0.0
         running_val_rot = 0.0
@@ -224,27 +224,27 @@ def main():
         bone_val = avg_val_bone
 
         current_model_lr = model_optimizer.param_groups[0]['lr']
-        current_poseaug_lr = poseaug_optimizer.param_groups[0]['lr']
-        poseaug_grad_norm = torch.nn.utils.clip_grad_norm_(poseaug_module.parameters(), max_norm=0.5)
+        #current_poseaug_lr = poseaug_optimizer.param_groups[0]['lr']
+        #poseaug_grad_norm = torch.nn.utils.clip_grad_norm_(poseaug_module.parameters(), max_norm=0.5)
 
         print(f"Epoch {epoch}/{NUM_EPOCHS}")
         print(f"  Train - Pos: {train_mm:.1f}mm, Rot: {rot_train:.4f}, Bone: {bone_train:.4f}")
         print(f"  Val   - Pos: {val_mm:.1f}mm, Rot: {rot_val:.4f}, Bone: {bone_val:.4f}")
-        print(f"  LR - Model: {current_model_lr:.6f}, PoseAug: {current_poseaug_lr:.6f}")
-        print(f"  PoseAug grad norm: {poseaug_grad_norm:.6f}")
+        #print(f"  LR - Model: {current_model_lr:.6f}, PoseAug: {current_poseaug_lr:.6f}")
+        #print(f"  PoseAug grad norm: {poseaug_grad_norm:.6f}")
         
         # Print PoseAug stats every 10 epochs
-        if epoch % 10 == 0:
-            aug_stats = poseaug_module.get_augmentation_stats()
-            print(f"  PoseAug - Rotation: {aug_stats['max_rotation_deg']:.1f}°, Translation: {aug_stats['max_translation_m']:.3f}m")
+        #if epoch % 10 == 0:
+        #    aug_stats = poseaug_module.get_augmentation_stats()
+        #    print(f"  PoseAug - Rotation: {aug_stats['max_rotation_deg']:.1f}°, Translation: {aug_stats['max_translation_m']:.3f}m")
 
         model_scheduler.step(avg_val_pos)
-        poseaug_scheduler.step(avg_val_pos)
+        #poseaug_scheduler.step(avg_val_pos)
 
         if avg_val_pos < best_val_mpjpe:
             best_val_mpjpe = avg_val_pos
             best_state     = model.state_dict().copy()
-            best_poseaug_state = poseaug_module.state_dict().copy()
+            #best_poseaug_state = poseaug_module.state_dict().copy()
             early_stopping_counter = 0
             print(f"✓ New best validation MPJPE: {val_mm:.1f} mm")
         else:
@@ -256,14 +256,14 @@ def main():
 
     # Load best states
     model.load_state_dict(best_state)
-    poseaug_module.load_state_dict(best_poseaug_state)
+    #poseaug_module.load_state_dict(best_poseaug_state)
     print(f"Training complete! Best Val MPJPE: {best_val_mpjpe*1000.0:.1f} mm")
 
     # Print final PoseAug parameters
-    final_stats = poseaug_module.get_augmentation_stats()
-    print(f"Final PoseAug parameters:")
-    print(f"  Max rotation: {final_stats['max_rotation_deg']:.1f}°")
-    print(f"  Max translation: {final_stats['max_translation_m']:.3f}m")
+    #final_stats = poseaug_module.get_augmentation_stats()
+    #print(f"Final PoseAug parameters:")
+    #print(f"  Max rotation: {final_stats['max_rotation_deg']:.1f}°")
+    #print(f"  Max translation: {final_stats['max_translation_m']:.3f}m")
 
     # Create plots
     fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(20, 6))
@@ -304,13 +304,13 @@ def main():
     torch.save({
         "epoch": epoch,
         "model_state": model.state_dict(),
-        "poseaug_state": poseaug_module.state_dict(),
+        #"poseaug_state": poseaug_module.state_dict(),
         "model_optimizer_state": model_optimizer.state_dict(),
-        "poseaug_optimizer_state": poseaug_optimizer.state_dict(),
+        #"poseaug_optimizer_state": poseaug_optimizer.state_dict(),
         "best_val_mpjpe": best_val_mpjpe,
         "best_val_rot_loss": avg_val_rot,
         "best_val_bone_loss": avg_val_bone,
-        "final_poseaug_stats": final_stats,
+        #"final_poseaug_stats": final_stats,
         "hyperparameters": {
             "batch_size": BATCH_SIZE,
             "learning_rate": LEARNING_RATE,
