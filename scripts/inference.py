@@ -2,8 +2,8 @@ import os, sys, json, cv2, torch, numpy as np, matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 from mmpose.apis import MMPoseInferencer
 
-IMAGE_PATH = r"assets\demo_images\Lorenzo\1000067779.jpg"
-CKPT_PATH = r"checkpoints\mlp_lifter_rotation_20250609_133841\final_model.pth"
+IMAGE_PATH = r"assets\demo_images\3DPW\image_00253.jpg"
+CKPT_PATH = r"checkpoints\mlp_lifter_rotation_poseaug_20250609_224512\final_model.pth"
 IMG_SIZE = 512
 OUTPUT_DIR = "outputs/inference"
 

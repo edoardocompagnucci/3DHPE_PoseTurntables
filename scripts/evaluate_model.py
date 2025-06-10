@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
-MODEL_PATH = r"checkpoints\mlp_lifter_rotation_20250609_133841\final_model.pth"
+MODEL_PATH = r"checkpoints\mlp_lifter_rotation_20250609_102904\final_model.pth"
 DATA_ROOT = os.path.join(PROJECT_ROOT, "data")
 BATCH_SIZE = 64
 sys.path.insert(0, PROJECT_ROOT)
