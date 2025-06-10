@@ -10,6 +10,7 @@ from models.rot_head import MLPLifterRotationHead
 from utils.losses import mpjpe_loss, combined_pose_loss, combined_pose_bone_loss
 from utils.transforms import NormalizerJoints2d
 from models.poseaug import DifferentiablePoseAug, PoseAugWrapper
+from src.data.threedpw_dataset import create_domain_mixing_datasets
 
 def main():
     SCRIPT_DIR     = os.path.dirname(os.path.abspath(__file__))
@@ -28,9 +29,8 @@ def main():
     LOSS_ROT_WEIGHT = 0.1
     LOSS_BONE_WEIGHT = 0.15
 
-    # PoseAug parameters
-    POSEAUG_LR = 1e-4  # Slightly lower LR for augmentation parameters
-    POSEAUG_INITIAL_ROTATION_DEG = 8.0  # Start with proven working values
+    POSEAUG_LR = 1e-4 
+    POSEAUG_INITIAL_ROTATION_DEG = 8.0
     POSEAUG_INITIAL_TRANSLATION_M = 0.02
 
     early_stopping_patience = 25
@@ -41,20 +41,13 @@ def main():
 
     normalizer = NormalizerJoints2d(img_size=IMG_SIZE)
 
-    # Note: We disable dataset-level augmentation since we're using learnable PoseAug
-    train_dataset = SyntheticPoseDataset(
+    train_dataset, val_dataset = create_domain_mixing_datasets(
         data_root=DATA_ROOT,
-        split_txt=os.path.join(DATA_ROOT, "splits", "train.txt"),
+        real_data_ratio=0.2,
         transform=normalizer,
-        augment_2d=False,  # Disable dataset augmentation, use learnable PoseAug instead
+        min_confidence=0.3
     )
-    val_dataset = SyntheticPoseDataset(
-        data_root=DATA_ROOT,
-        split_txt=os.path.join(DATA_ROOT, "splits", "val.txt"),
-        transform=normalizer,
-        augment_2d=False,  # No augmentation for validation
-    )
-    
+        
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True,
                               num_workers=4, pin_memory=False)
     val_loader   = DataLoader(val_dataset,   batch_size=BATCH_SIZE, shuffle=False,
