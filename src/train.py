@@ -4,34 +4,30 @@ from datetime import datetime
 import torch
 from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
+from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 
 from data.synthetic_pose_dataset import SyntheticPoseDataset
 from models.rot_head import MLPLifterRotationHead
 from utils.losses import mpjpe_loss, combined_pose_loss, combined_pose_bone_loss
 from utils.transforms import NormalizerJoints2d
-from models.poseaug import DifferentiablePoseAug, PoseAugWrapper
 from src.data.threedpw_dataset import create_domain_mixing_datasets
 
 def main():
-    SCRIPT_DIR     = os.path.dirname(os.path.abspath(__file__))
+    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
     DATA_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "data"))
-    CHECKPOINT_ROOT= "checkpoints"
+    CHECKPOINT_ROOT = "checkpoints"
 
-    BATCH_SIZE     = 64  
+    BATCH_SIZE = 64  
     DROPOUT_RATE = 0.1
-    LEARNING_RATE  = 2e-4
-    WEIGHT_DECAY   = 1e-4
-    NUM_EPOCHS     = 350
-    NUM_JOINTS     = 24
+    LEARNING_RATE = 2e-4
+    WEIGHT_DECAY = 1e-4
+    NUM_EPOCHS = 350
+    NUM_JOINTS = 24
     IMG_SIZE = 512
 
     LOSS_POS_WEIGHT = 1.0
     LOSS_ROT_WEIGHT = 0.1
     LOSS_BONE_WEIGHT = 0.15
-
-    POSEAUG_LR = 1e-4 
-    POSEAUG_INITIAL_ROTATION_DEG = 8.0
-    POSEAUG_INITIAL_TRANSLATION_M = 0.02
 
     early_stopping_patience = 25
     early_stopping_counter = 0
@@ -41,93 +37,112 @@ def main():
 
     normalizer = NormalizerJoints2d(img_size=IMG_SIZE)
 
+    current_real_ratio = 0.2
     train_dataset, val_dataset = create_domain_mixing_datasets(
         data_root=DATA_ROOT,
-        real_data_ratio=0.2,
+        real_data_ratio=current_real_ratio,
         transform=normalizer,
         min_confidence=0.3
     )
-        
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True,
-                              num_workers=4, pin_memory=False)
-    val_loader   = DataLoader(val_dataset,   batch_size=BATCH_SIZE, shuffle=False,
-                              num_workers=4, pin_memory=False)
 
-    # Create main model
+    train_loader = DataLoader(train_dataset,
+                              batch_size=BATCH_SIZE,
+                              shuffle=True,
+                              num_workers=12,
+                              pin_memory=True,
+                              persistent_workers=True,
+                              prefetch_factor=6)
+    
+    val_loader = DataLoader(val_dataset,
+                            batch_size=BATCH_SIZE,
+                            shuffle=False,
+                            num_workers=12,
+                            pin_memory=True,
+                            persistent_workers=True,
+                            prefetch_factor=6)
+
     model = MLPLifterRotationHead(num_joints=NUM_JOINTS, dropout=DROPOUT_RATE).to(device)
-    
-    # Create learnable PoseAug module
-    #poseaug_module = DifferentiablePoseAug(
-    #    initial_max_rotation_deg=POSEAUG_INITIAL_ROTATION_DEG,
-    #    initial_max_translation_m=POSEAUG_INITIAL_TRANSLATION_M,
-    #    augmentation_prob=0.5
-    #).to(device)
-    
-    # Wrap PoseAug for easy integration with training loop
-    #poseaug_wrapper = PoseAugWrapper(poseaug_module, img_size=IMG_SIZE).to(device)
-    
-    # Create optimizers - separate for model and PoseAug parameters
+
     model_optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
-    #poseaug_optimizer = torch.optim.Adam(poseaug_module.parameters(), lr=POSEAUG_LR, weight_decay=WEIGHT_DECAY * 0.1)
-    
-    # Schedulers
-    model_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        model_optimizer, mode="min", factor=0.5, patience=2, verbose=True
+
+    model_scheduler = CosineAnnealingWarmRestarts(
+        model_optimizer,
+        T_0=50,  # Initial cycle length - matches domain shift epochs
+        T_mult=1,  # Keep consistent cycle length 
+        eta_min=1e-5  # Minimum learning rate
     )
-    #poseaug_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-    #    poseaug_optimizer, mode="min", factor=0.7, patience=3, verbose=False
-    #)
 
     os.makedirs(CHECKPOINT_ROOT, exist_ok=True)
-    exp_name       = f"mlp_lifter_rotation_poseaug_{datetime.now():%Y%m%d_%H%M%S}"
+    exp_name = f"mlp_lifter_domain_mixing_{datetime.now():%Y%m%d_%H%M%S}"
     experiment_dir = os.path.join(CHECKPOINT_ROOT, exp_name)
     os.makedirs(experiment_dir, exist_ok=True)
     print(f"Saving checkpoints to: {experiment_dir}")
-    
-    # Print initial PoseAug parameters
-    #initial_stats = poseaug_module.get_augmentation_stats()
-    #print(f"Initial PoseAug parameters:")
-    #print(f"  Max rotation: {initial_stats['max_rotation_deg']:.1f}°")
-    #print(f"  Max translation: {initial_stats['max_translation_m']:.3f}m")
 
     best_val_mpjpe = float("inf")
-    best_state     = None
-    best_poseaug_state = None
+    best_state = None
+    best_val_mpjpe_per_ratio = {}  # Track best performance per ratio
+    best_state_per_ratio = {}  # Track best model state per ratio
     train_losses, val_losses = [], []
     train_rot_losses, val_rot_losses = [], []
     train_bone_losses, val_bone_losses = [], []
+    syn_losses, real_losses = [], []
 
     for epoch in range(1, NUM_EPOCHS + 1):
-        if epoch == 100:
-            LOSS_BONE_WEIGHT = 0.05
+        if epoch <= 50:
+            target_real_ratio = 0.2
+            LOSS_BONE_WEIGHT = 0.15  # Initial value
+        elif epoch <= 100:
+            target_real_ratio = 0.3  
+            LOSS_BONE_WEIGHT = 0.05  # First reduction
+        elif epoch <= 150:
+            target_real_ratio = 0.4
+            LOSS_BONE_WEIGHT = 0.025  # Second reduction
+        else:
+            target_real_ratio = 0.5
+            LOSS_BONE_WEIGHT = 0.01  # Final value
             
-        # Training phase
+        if target_real_ratio != current_real_ratio:
+            current_real_ratio = target_real_ratio
+            early_stopping_counter = 0  # Reset counter on domain shift
+            print(f"Updating real data ratio to {current_real_ratio:.1%}")
+            train_dataset, val_dataset = create_domain_mixing_datasets(
+                data_root=DATA_ROOT,
+                real_data_ratio=current_real_ratio,
+                transform=normalizer,
+                min_confidence=0.3
+            )
+
+            train_loader = DataLoader(train_dataset,
+                                    batch_size=BATCH_SIZE,
+                                    shuffle=True,
+                                    num_workers=12,
+                                    pin_memory=True,
+                                    persistent_workers=True,
+                                    prefetch_factor=6)
+            
+            val_loader = DataLoader(val_dataset,
+                                    batch_size=BATCH_SIZE,
+                                    shuffle=False,
+                                    num_workers=12,
+                                    pin_memory=True,
+                                    persistent_workers=True,
+                                    prefetch_factor=6)
+            
         model.train()
-        #poseaug_wrapper.train()
         running_loss = 0.0
         running_pos_loss = 0.0
         running_rot_loss = 0.0
         running_bone_loss = 0.0
+        syn_loss_sum, real_loss_sum = 0.0, 0.0
+        syn_count, real_count = 0, 0
         
         for batch in train_loader:
-            # Move batch to device
-            inputs = batch["joints_2d"].to(device)  # (B, 24, 2)
+            inputs = batch["joints_2d"].to(device)
             target_pos = batch["joints_3d_centered"].to(device)
             target_rot = batch["rot_6d"].to(device)
-            
-            # Camera parameters for PoseAug
-            joints_3d_world = batch["joints_3d_world"].to(device)  # (B, 24, 3)
-            K = batch["K"].to(device)  # (B, 3, 3)
-            R = batch["R"].to(device)  # (B, 3, 3) 
-            t = batch["t"].to(device)  # (B, 3)
+            dataset_types = batch["dataset_type"]
 
-            # Apply learnable PoseAug to augment 2D keypoints
-            #augmented_inputs = poseaug_wrapper(
-            #    inputs, joints_3d_world, K, R, t, training=True
-            #)
-            augmented_inputs = inputs
-            # Forward pass through main model with augmented inputs
-            pos3d, rot6d = model(augmented_inputs)
+            pos3d, rot6d = model(inputs)
 
             pred_dict = {
                 'positions': pos3d,
@@ -145,17 +160,19 @@ def main():
             
             loss = loss_dict['total']
 
-            # Backward pass and optimization
+            for i, dataset_type in enumerate(dataset_types):
+                sample_loss = loss_dict['total'].item() / len(dataset_types)
+                if dataset_type == 'synthetic':
+                    syn_loss_sum += sample_loss
+                    syn_count += 1
+                else:
+                    real_loss_sum += sample_loss
+                    real_count += 1
+
             model_optimizer.zero_grad()
-            #poseaug_optimizer.zero_grad()
             loss.backward()
-            
-            # Gradient clipping
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            #torch.nn.utils.clip_grad_norm_(poseaug_module.parameters(), max_norm=0.5)
-            
             model_optimizer.step()
-            #poseaug_optimizer.step()
             
             running_loss += loss.item()
             running_pos_loss += loss_dict['position'].item()
@@ -166,14 +183,16 @@ def main():
         avg_train_pos = running_pos_loss / len(train_loader)
         avg_train_rot = running_rot_loss / len(train_loader)
         avg_train_bone = running_bone_loss / len(train_loader)
+        avg_syn_loss = syn_loss_sum / syn_count if syn_count > 0 else 0
+        avg_real_loss = real_loss_sum / real_count if real_count > 0 else 0
         
         train_losses.append(avg_train)
         train_rot_losses.append(avg_train_rot)
         train_bone_losses.append(avg_train_bone)
+        syn_losses.append(avg_syn_loss)
+        real_losses.append(avg_real_loss)
 
-        # Validation phase
         model.eval()
-        #poseaug_wrapper.eval()
         running_val = 0.0
         running_val_pos = 0.0
         running_val_rot = 0.0
@@ -185,7 +204,6 @@ def main():
                 target_pos = batch["joints_3d_centered"].to(device)
                 target_rot = batch["rot_6d"].to(device)
                 
-                # No augmentation during validation
                 pos3d, rot6d = model(inputs)
                 
                 pred_dict = {
@@ -217,34 +235,25 @@ def main():
         val_bone_losses.append(avg_val_bone)
 
         train_mm = avg_train_pos * 1000.0
-        val_mm   = avg_val_pos * 1000.0
+        val_mm = avg_val_pos * 1000.0
         rot_train = avg_train_rot
         rot_val = avg_val_rot
         bone_train = avg_train_bone
         bone_val = avg_val_bone
 
         current_model_lr = model_optimizer.param_groups[0]['lr']
-        #current_poseaug_lr = poseaug_optimizer.param_groups[0]['lr']
-        #poseaug_grad_norm = torch.nn.utils.clip_grad_norm_(poseaug_module.parameters(), max_norm=0.5)
 
-        print(f"Epoch {epoch}/{NUM_EPOCHS}")
+        print(f"Epoch {epoch}/{NUM_EPOCHS} (Real: {current_real_ratio:.1%})")
         print(f"  Train - Pos: {train_mm:.1f}mm, Rot: {rot_train:.4f}, Bone: {bone_train:.4f}")
         print(f"  Val   - Pos: {val_mm:.1f}mm, Rot: {rot_val:.4f}, Bone: {bone_val:.4f}")
-        #print(f"  LR - Model: {current_model_lr:.6f}, PoseAug: {current_poseaug_lr:.6f}")
-        #print(f"  PoseAug grad norm: {poseaug_grad_norm:.6f}")
-        
-        # Print PoseAug stats every 10 epochs
-        #if epoch % 10 == 0:
-        #    aug_stats = poseaug_module.get_augmentation_stats()
-        #    print(f"  PoseAug - Rotation: {aug_stats['max_rotation_deg']:.1f}°, Translation: {aug_stats['max_translation_m']:.3f}m")
+        print(f"  Syn/Real - Syn: {avg_syn_loss:.4f}, Real: {avg_real_loss:.4f}")
+        print(f"  LR: {current_model_lr:.6f}")
 
-        model_scheduler.step(avg_val_pos)
-        #poseaug_scheduler.step(avg_val_pos)
+        model_scheduler.step()
 
         if avg_val_pos < best_val_mpjpe:
             best_val_mpjpe = avg_val_pos
-            best_state     = model.state_dict().copy()
-            #best_poseaug_state = poseaug_module.state_dict().copy()
+            best_state = model.state_dict().copy()
             early_stopping_counter = 0
             print(f"✓ New best validation MPJPE: {val_mm:.1f} mm")
         else:
@@ -253,20 +262,36 @@ def main():
             if early_stopping_counter >= early_stopping_patience:
                 print(f"Early stopping triggered after {epoch} epochs")
                 break
+                
+        # Track best model per ratio
+        if current_real_ratio not in best_val_mpjpe_per_ratio or avg_val_pos < best_val_mpjpe_per_ratio[current_real_ratio]:
+            best_val_mpjpe_per_ratio[current_real_ratio] = avg_val_pos
+            best_state_per_ratio[current_real_ratio] = model.state_dict().copy()
+            print(f"✓ New best for {current_real_ratio:.1%} real data: {val_mm:.1f} mm")
 
-    # Load best states
-    model.load_state_dict(best_state)
-    #poseaug_module.load_state_dict(best_poseaug_state)
-    print(f"Training complete! Best Val MPJPE: {best_val_mpjpe*1000.0:.1f} mm")
+    # Determine highest ratio that completed training
+    final_ratio = max(best_state_per_ratio.keys())  
+    model.load_state_dict(best_state_per_ratio[final_ratio])
+    print(f"Training complete! Best Val MPJPE overall: {best_val_mpjpe*1000.0:.1f} mm")
+    print(f"Using best model from {final_ratio:.1%} real data with MPJPE: {best_val_mpjpe_per_ratio[final_ratio]*1000.0:.1f} mm")
 
-    # Print final PoseAug parameters
-    #final_stats = poseaug_module.get_augmentation_stats()
-    #print(f"Final PoseAug parameters:")
-    #print(f"  Max rotation: {final_stats['max_rotation_deg']:.1f}°")
-    #print(f"  Max translation: {final_stats['max_translation_m']:.3f}m")
+    # Create visualization with per-ratio performance
+    real_ratios = sorted(best_val_mpjpe_per_ratio.keys())
+    ratio_epochs = []
+    ratio_perfs = []
 
-    # Create plots
-    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(20, 6))
+    for ratio in real_ratios:
+        ratio_epochs.append(f"{ratio:.0%}")
+        ratio_perfs.append(best_val_mpjpe_per_ratio[ratio] * 1000.0)
+
+    fig = plt.figure(figsize=(16, 18))
+    
+    # Create a 3x2 grid
+    ax1 = fig.add_subplot(3, 2, 1)
+    ax2 = fig.add_subplot(3, 2, 2)
+    ax3 = fig.add_subplot(3, 2, 3)
+    ax4 = fig.add_subplot(3, 2, 4)
+    ax5 = fig.add_subplot(3, 2, 5)  # Fifth subplot (bottom left)
 
     ax1.plot([l*1000.0 for l in [loss['position'] if isinstance(loss, dict) else loss for loss in train_losses]], 
              label="Train MPJPE", alpha=0.8)
@@ -293,38 +318,52 @@ def main():
     ax3.set_title("Bone Consistency Loss")
     ax3.legend()
     ax3.grid(True, alpha=0.3)
+
+    ax4.plot(syn_losses, label="Synthetic Loss", alpha=0.8)
+    ax4.plot(real_losses, label="Real Loss", alpha=0.8)
+    ax4.set_xlabel("Epoch")
+    ax4.set_ylabel("Loss")
+    ax4.set_title("Synthetic vs Real Loss")
+    ax4.legend()
+    ax4.grid(True, alpha=0.3)
+    
+    # Add new subplot for per-ratio performance
+    ax5.bar(ratio_epochs, ratio_perfs, alpha=0.7, color='green')
+    ax5.set_xlabel("Real Data Ratio")
+    ax5.set_ylabel("Best MPJPE (mm)")
+    ax5.set_title("Best Performance Per Domain Ratio")
+    for i, v in enumerate(ratio_perfs):
+        ax5.text(i, v + 1, f"{v:.1f}", ha='center')
+    ax5.grid(True, alpha=0.3)
     
     plt.tight_layout()
     curve_path = os.path.join(experiment_dir, "learning_curves.png")
     plt.savefig(curve_path, dpi=150)
     print(f"Learning curves → {curve_path}")
 
-    # Save final model with PoseAug parameters
     final_path = os.path.join(experiment_dir, "final_model.pth")
     torch.save({
         "epoch": epoch,
         "model_state": model.state_dict(),
-        #"poseaug_state": poseaug_module.state_dict(),
         "model_optimizer_state": model_optimizer.state_dict(),
-        #"poseaug_optimizer_state": poseaug_optimizer.state_dict(),
         "best_val_mpjpe": best_val_mpjpe,
         "best_val_rot_loss": avg_val_rot,
         "best_val_bone_loss": avg_val_bone,
-        #"final_poseaug_stats": final_stats,
+        "best_val_mpjpe_per_ratio": best_val_mpjpe_per_ratio,
+        "final_selected_ratio": final_ratio,
         "hyperparameters": {
             "batch_size": BATCH_SIZE,
             "learning_rate": LEARNING_RATE,
-            "poseaug_lr": POSEAUG_LR,
             "weight_decay": WEIGHT_DECAY,
             "dropout_rate": DROPOUT_RATE,
             "pos_weight": LOSS_POS_WEIGHT,
             "rot_weight": LOSS_ROT_WEIGHT,
             "bone_weight": LOSS_BONE_WEIGHT,
-            "poseaug_initial_rotation_deg": POSEAUG_INITIAL_ROTATION_DEG,
-            "poseaug_initial_translation_m": POSEAUG_INITIAL_TRANSLATION_M
+            "final_real_ratio": current_real_ratio,
+            "scheduler": "CosineAnnealingWarmRestarts"
         }
     }, final_path)
-    print(f"Final model with PoseAug → {final_path}")
+    print(f"Final model → {final_path}")
 
 if __name__ == "__main__":
     main()

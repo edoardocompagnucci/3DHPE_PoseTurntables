@@ -26,8 +26,8 @@ class SyntheticPoseDataset(Dataset):
                  noise_std=0.02,
                  confidence_noise=0.005,
                  max_shift=0.005,
-                 camera_aug_rotation_deg=10.0,
-                 camera_aug_translation_m=0.05):
+                 camera_aug_rotation_deg=8.0,
+                 camera_aug_translation_m=0.02):
         
         self.root = data_root
         self.transform = transform
@@ -153,12 +153,17 @@ class SyntheticPoseDataset(Dataset):
             "rot_6d": rot_6d,
             "K": K,
             "R": R,
-            "t": t
+            "t": t,
+            "sample_id": did,  # Use the sample ID
+            "avg_confidence": 1.0,  # Synthetic = perfect confidence
+            "sequence_name": "synthetic",
+            "frame_idx": -1,  # Not applicable for synthetic
+            "actor_idx": -1,  # Not applicable for synthetic
         }
 
-        rgb_path = os.path.join(self.paths["rgb"], f"{did}.png")
-        if os.path.exists(rgb_path):
-            sample["rgb"] = torch.tensor(np.array(Image.open(rgb_path)))
+        #rgb_path = os.path.join(self.paths["rgb"], f"{did}.png")
+        #if os.path.exists(rgb_path):
+        #    sample["rgb"] = torch.tensor(np.array(Image.open(rgb_path)))
 
         root = sample["joints_3d"][0].clone()
         sample["joints_3d_centered"] = sample["joints_3d"] - root
