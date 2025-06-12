@@ -38,21 +38,17 @@ def main():
     early_stopping_counter_mixed = 0
     early_stopping_counter_3dpw = 0
 
-    # Domain schedule - more aggressive since you're at 125mm
+    # Domain schedule - AGGRESSIVE for breaking 125mm
     def get_domain_schedule(epoch):
         """Get real data ratio and bone weight for current epoch"""
-        if epoch <= 30:
-            return 0.25, 0.08  # Start at 25%
-        elif epoch <= 60:
-            return 0.30, 0.06
+        if epoch <= 50:
+            return 0.50, 0.04  # Jump to 50%!
+        elif epoch <= 70:
+            return 0.60, 0.03
         elif epoch <= 90:
-            return 0.35, 0.04
-        elif epoch <= 120:
-            return 0.40, 0.03
-        elif epoch <= 150:
-            return 0.45, 0.02
+            return 0.70, 0.02
         else:
-            return 0.50, 0.01  # Max out at 50%
+            return 0.75, 0.01
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
@@ -77,18 +73,18 @@ def main():
     train_loader = DataLoader(train_dataset,
                               batch_size=BATCH_SIZE,
                               shuffle=True,
-                              num_workers=12,
+                              num_workers=20,
                               pin_memory=True,
                               persistent_workers=True,
-                              prefetch_factor=6)
+                              prefetch_factor=8)
     
     val_loader = DataLoader(val_dataset,
                             batch_size=BATCH_SIZE,
                             shuffle=False,
-                            num_workers=12,
+                            num_workers=20,
                             pin_memory=True,
                             persistent_workers=True,
-                            prefetch_factor=6)
+                            prefetch_factor=8)
 
     model = MLPLifterRotationHead(num_joints=NUM_JOINTS, dropout=DROPOUT_RATE).to(device)
 
@@ -144,12 +140,14 @@ def main():
             
             current_real_ratio = target_real_ratio
             
-            # Reduce learning rate on domain shift
+            # FIXED: Gentle learning rate reduction with floor
             for param_group in model_optimizer.param_groups:
-                param_group['lr'] *= 0.9
+                old_lr = param_group['lr']
+                new_lr = max(old_lr * 0.97, 3e-5)  # Only 3% reduction, floor at 3e-5
+                param_group['lr'] = new_lr
             
             print(f"📈 Domain shift to {current_real_ratio:.1%} real data")
-            print(f"🔧 Learning rate reduced to {model_optimizer.param_groups[0]['lr']:.6f}")
+            print(f"🔧 Learning rate: {old_lr:.6f} → {new_lr:.6f}")
             print(f"🦴 Bone weight: {target_bone_weight:.3f}")
             
             train_dataset, val_dataset = create_domain_mixing_datasets(
@@ -162,18 +160,18 @@ def main():
             train_loader = DataLoader(train_dataset,
                                     batch_size=BATCH_SIZE,
                                     shuffle=True,
-                                    num_workers=12,
+                                    num_workers=20,
                                     pin_memory=True,
                                     persistent_workers=True,
-                                    prefetch_factor=6)
+                                    prefetch_factor=8)
             
             val_loader = DataLoader(val_dataset,
                                     batch_size=BATCH_SIZE,
                                     shuffle=False,
-                                    num_workers=12,
+                                    num_workers=20,
                                     pin_memory=True,
                                     persistent_workers=True,
-                                    prefetch_factor=6)
+                                    prefetch_factor=8)
             
         # Training phase
         model.train()
@@ -201,6 +199,7 @@ def main():
                 'rotations': target_rot
             }
             
+            # Compute main losses
             loss_dict = combined_pose_bone_loss(pred_dict, target_dict, 
                                 pos_weight=LOSS_POS_WEIGHT, 
                                 rot_weight=LOSS_ROT_WEIGHT,
@@ -284,14 +283,8 @@ def main():
         val_rot_losses.append(avg_val_rot)
         val_bone_losses.append(avg_val_bone)
 
-        # Adaptive 3DPW evaluation frequency
-        should_eval_3dpw = False
-        if epoch < 50 and epoch % 10 == 0:
-            should_eval_3dpw = True
-        elif epoch < 100 and epoch % 5 == 0:
-            should_eval_3dpw = True
-        elif epoch >= 100 and epoch % 3 == 0:
-            should_eval_3dpw = True
+        # FIXED: Evaluate on 3DPW only every 20 epochs
+        should_eval_3dpw = (epoch % 20 == 0)
         
         # Always evaluate if we just had a domain shift
         if epoch > 1 and get_domain_schedule(epoch-1)[0] != current_real_ratio:
