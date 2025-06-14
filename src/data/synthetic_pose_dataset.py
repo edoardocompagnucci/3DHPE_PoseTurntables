@@ -19,6 +19,22 @@ with open(json_path, "r") as f:
 
 SMPL_TO_MPII = np.array([-1 if m is None else m for m in mapping["smpl2mpii"]], dtype=np.int16)
 
+# FIXED: Consistent joint definitions
+SMPL_EXTREMITY_JOINTS = [7, 8, 10, 11, 18, 19, 20, 21, 22, 23]  # ankles, feet, wrists, hands
+SMPL_CORE_JOINTS = [0, 1, 2, 3, 4, 5, 6, 9, 12, 13, 14, 15, 16, 17]  # pelvis, hips, knees, spine, shoulders, elbows
+
+# FIXED: Map SMPL extremities to MPII indices for corruption
+def get_mpii_extremity_indices():
+    """Get MPII indices that correspond to SMPL extremity joints"""
+    mpii_extremities = []
+    for smpl_idx in SMPL_EXTREMITY_JOINTS:
+        mpii_idx = SMPL_TO_MPII[smpl_idx] if smpl_idx < len(SMPL_TO_MPII) else -1
+        if mpii_idx >= 0:  # Valid mapping exists
+            mpii_extremities.append(mpii_idx)
+    return mpii_extremities
+
+MPII_EXTREMITY_JOINTS = get_mpii_extremity_indices()
+
 
 class SyntheticPoseDataset(Dataset):
     def __init__(self, data_root, split_txt, transform=None, 
@@ -27,7 +43,9 @@ class SyntheticPoseDataset(Dataset):
                  confidence_noise=0.005,
                  max_shift=0.005,
                  camera_aug_rotation_deg=8.0,
-                 camera_aug_translation_m=0.02):
+                 camera_aug_translation_m=0.02,
+                 break_domain_discrimination=True,
+                 corruption_schedule='progressive'):  # NEW: corruption scheduling
         
         self.root = data_root
         self.transform = transform
@@ -35,8 +53,13 @@ class SyntheticPoseDataset(Dataset):
         self.noise_std = noise_std
         self.confidence_noise = confidence_noise
         self.max_shift = max_shift
- 
-        self.unreliable_joints = [10, 11, 15, 22, 23]
+        self.break_domain_discrimination = break_domain_discrimination
+        self.corruption_schedule = corruption_schedule
+        
+        # Use consistent joint definitions
+        self.extremity_joints_smpl = SMPL_EXTREMITY_JOINTS
+        self.core_joints_smpl = SMPL_CORE_JOINTS
+        self.extremity_joints_mpii = MPII_EXTREMITY_JOINTS
 
         with open(split_txt) as f:
             self.ids = [ln.strip() for ln in f if ln.strip()]
@@ -57,6 +80,12 @@ class SyntheticPoseDataset(Dataset):
             max_rotation_deg=camera_aug_rotation_deg,
             max_translation_m=camera_aug_translation_m
         )
+        
+        print(f"📊 SyntheticPoseDataset initialized:")
+        print(f"   Samples: {len(self.ids)}")
+        print(f"   Domain breaking: {break_domain_discrimination}")
+        print(f"   MPII extremities: {self.extremity_joints_mpii}")
+        
     def __len__(self):
         return len(self.ids)
 
@@ -67,55 +96,138 @@ class SyntheticPoseDataset(Dataset):
             if mpii_idx >= 0:
                 out[smpl_idx] = kp2d[mpii_idx]
         return out
-
-    def augment_2d_keypoints_pixel_space(self, joints_2d_pixel):
-
-        if not self.augment_2d:
-            return joints_2d_pixel
-
-        augmented = joints_2d_pixel.clone()
-
-        joints_np = augmented.cpu().numpy()
-
-        angle = np.random.uniform(-30.0, +30.0)
-        scale = np.random.uniform(0.7, 1.3)
-        tx    = np.random.uniform(-0.1, +0.1) * 512.0 
-        ty    = np.random.uniform(-0.1, +0.1) * 512.0
-
-        alpha = np.deg2rad(angle)
-
-        M = np.array([
-            [scale * np.cos(alpha), -scale * np.sin(alpha), tx],
-            [scale * np.sin(alpha),  scale * np.cos(alpha), ty]
-        ], dtype=np.float32)   # (2×3)
-
-        joints_homo = np.concatenate([
-            joints_np, 
-            np.ones((joints_np.shape[0], 1), dtype=np.float32)
-        ], axis=1)
-
-        aug_np = (M @ joints_homo.T).T
-
-        augmented = torch.from_numpy(aug_np).float()
-
-        if self.noise_std > 0:
-            pixel_noise = torch.randn_like(augmented) * (self.noise_std * 512.0)
-            augmented = augmented + pixel_noise
-
-        if self.confidence_noise > 0:
-            for joint_idx in self.unreliable_joints:
-                if joint_idx < augmented.shape[0] and torch.rand(1) < 0.2:
-                    extra_noise = torch.randn(2) * (self.confidence_noise * 512.0)
-                    augmented[joint_idx] += extra_noise
-
-        if self.max_shift > 0:
-            if torch.rand(1) < 0.15:
-                global_shift = (torch.rand(2) - 0.5) * 2 * (self.max_shift * 512.0)
-                augmented += global_shift
-        augmented = torch.clamp(augmented, 0.0, 512.0)
-
-        return augmented
     
+    def generate_synthetic_confidence(self, joints_2d_mpii, corrupted_joints, base_confidence=0.9):
+        """
+        FIXED: Generate realistic confidence scores that don't leak domain info
+        """
+        num_joints = joints_2d_mpii.shape[0]
+        
+        # FIXED: More realistic confidence distribution
+        # Real data typically has confidence 0.4-0.9, so we match this range
+        if len(corrupted_joints) > 0:
+            # When corrupted, generate confidence similar to real data
+            confidence = torch.rand(num_joints) * 0.5 + 0.4  # Range 0.4-0.9
+        else:
+            # Clean synthetic data can have higher confidence but not perfect
+            confidence = torch.rand(num_joints) * 0.2 + 0.8  # Range 0.8-1.0
+        
+        # FIXED: Reduce confidence for actually corrupted joints
+        for joint_idx in corrupted_joints:
+            if joint_idx < num_joints:
+                # Corrupted joints get lower confidence
+                confidence[joint_idx] = torch.rand(()).item() * 0.4 + 0.3  # Range 0.3-0.7
+        
+        # Add slight noise to make it realistic
+        confidence += torch.randn(num_joints) * 0.05
+        confidence = torch.clamp(confidence, 0.3, 1.0)
+        
+        return confidence
+        
+    def get_corruption_params(self, epoch=None):
+        """Get corruption parameters based on epoch and schedule"""
+        if not self.break_domain_discrimination:
+            return 0.0, 0.0  # No corruption
+            
+        if epoch is None:
+            corruption_prob = 0.7
+            corruption_strength = 1.0
+        else:
+            if self.corruption_schedule == 'progressive':
+                # Start high, gradually reduce
+                corruption_prob = max(0.4, 0.8 - epoch * 0.008)
+                corruption_strength = max(0.5, 1.2 - epoch * 0.01)
+            elif self.corruption_schedule == 'constant':
+                corruption_prob = 0.6
+                corruption_strength = 0.8
+            else:  # adaptive
+                # High corruption early, then stabilize
+                if epoch < 20:
+                    corruption_prob = 0.8
+                    corruption_strength = 1.0
+                else:
+                    corruption_prob = 0.5
+                    corruption_strength = 0.7
+                    
+        return corruption_prob, corruption_strength
+        
+    def apply_extremity_corruption(self, joints_2d_mpii, epoch=None):
+        """
+        FIXED: Improved extremity corruption with better mapping and strategies
+        """
+        if not self.break_domain_discrimination:
+            return joints_2d_mpii, []
+        
+        corrupted_joints = []
+        joints_2d = joints_2d_mpii.clone()
+        
+        corruption_prob, corruption_strength = self.get_corruption_params(epoch)
+        
+        # Apply corruption with current probability
+        if torch.rand(()).item() < corruption_prob:
+            # FIXED: Select extremities based on proper MPII mapping
+            available_extremities = [idx for idx in self.extremity_joints_mpii if idx < joints_2d.shape[0]]
+            
+            if len(available_extremities) > 0:
+                # Corrupt 50-80% of available extremities
+                num_to_corrupt = max(1, int(len(available_extremities) * (0.5 + torch.rand(()).item() * 0.3)))
+                joints_to_corrupt = torch.randperm(len(available_extremities))[:num_to_corrupt]
+                
+                for idx in joints_to_corrupt:
+                    joint_idx = available_extremities[idx]
+                    corrupted_joints.append(joint_idx)
+                    
+                    # FIXED: Multiple corruption strategies with proper scaling
+                    corruption_type = torch.rand(()).item()
+                    
+                    if corruption_type < 0.4:
+                        # Strategy 1: Systematic bias (mimicking detection drift)
+                        bias_direction = torch.randn(2) * 0.1 * corruption_strength
+                        # Add position-dependent bias
+                        if joints_2d[joint_idx, 0] > 0:  # Right side joints
+                            bias_direction[0] += 0.05 * corruption_strength
+                        else:  # Left side joints  
+                            bias_direction[0] -= 0.05 * corruption_strength
+                        joints_2d[joint_idx] += bias_direction
+                        
+                    elif corruption_type < 0.7:
+                        # Strategy 2: High noise (detection uncertainty)
+                        noise_level = (0.05 + torch.rand(()).item() * 0.1) * corruption_strength
+                        joints_2d[joint_idx] += torch.randn(2) * noise_level
+                        
+                    else:
+                        # Strategy 3: Detection failure (complete miss)
+                        if torch.rand(()).item() < 0.2 * corruption_strength:
+                            # Occasionally completely wrong position
+                            joints_2d[joint_idx] = torch.rand(2) * 2.0 - 1.0  # Random position in [-1,1]
+                        else:
+                            # Or copy from nearby joint with large offset
+                            if len(available_extremities) > 1:
+                                other_joint = available_extremities[torch.randint(0, len(available_extremities), (1,)).item()]
+                                if other_joint != joint_idx and other_joint < joints_2d.shape[0]:
+                                    joints_2d[joint_idx] = joints_2d[other_joint] + torch.randn(2) * 0.15 * corruption_strength
+            
+            # FIXED: Add correlated errors between connected extremities
+            self._add_correlated_errors(joints_2d, corrupted_joints, corruption_strength)
+        
+        # Keep joints in reasonable range
+        joints_2d = torch.clamp(joints_2d, -1.5, 1.5)
+        
+        return joints_2d, corrupted_joints
+    
+    def _add_correlated_errors(self, joints_2d, corrupted_joints, corruption_strength):
+        """Add correlated errors between connected joints"""
+        # This would need the actual MPII joint structure
+        # For now, add some general correlation between nearby joints
+        if len(corrupted_joints) > 0:
+            # If multiple joints corrupted, make them slightly correlated
+            if len(corrupted_joints) >= 2:
+                for i in range(1, len(corrupted_joints)):
+                    if corrupted_joints[i] < joints_2d.shape[0] and corrupted_joints[0] < joints_2d.shape[0]:
+                        # Add small correlation
+                        correlation = torch.randn(2) * 0.03 * corruption_strength
+                        joints_2d[corrupted_joints[i]] += correlation
+
     def __getitem__(self, idx):
         did = self.ids[idx]
         load = lambda key: np.load(os.path.join(self.paths[key], f"{did}.npy"))
@@ -128,16 +240,32 @@ class SyntheticPoseDataset(Dataset):
         R = torch.tensor(load("R"), dtype=torch.float32)
         t = torch.tensor(load("t"), dtype=torch.float32)
 
+        # Store original clean keypoints for debugging
+        joints_2d_mpii_clean = joints_2d_mpii.clone()
+        
         if self.augment_2d:
-            # 50% chance to use camera augmentation, 50% chance to keep original
+            # First apply camera augmentation
             if np.random.random() < 0.5:
                 augmented_2d_mpii = self.camera_augmenter.augment_viewpoint(
                     joints_3d, K, R, t
                 )
                 if augmented_2d_mpii is not None:
                     joints_2d_mpii = augmented_2d_mpii
-            #joints_2d_mpii = self.augment_2d_keypoints_pixel_space(joints_2d_mpii)
-            # Otherwise keep original stored 2D keypoints (joints_2d_mpii unchanged)
+            
+            # FIXED: Apply extremity-specific corruption with epoch info
+            # Note: We don't have epoch info here, so we'll use None
+            joints_2d_mpii, corrupted_joints = self.apply_extremity_corruption(joints_2d_mpii)
+            
+            # Generate confidence scores based on corruption
+            confidence_scores = self.generate_synthetic_confidence(joints_2d_mpii, corrupted_joints)
+        else:
+            # Validation: minimal corruption but still some variation to avoid perfect domain signals
+            if self.break_domain_discrimination and torch.rand(()).item() < 0.1:
+                joints_2d_mpii, corrupted_joints = self.apply_extremity_corruption(joints_2d_mpii)
+                confidence_scores = self.generate_synthetic_confidence(joints_2d_mpii, corrupted_joints)
+            else:
+                # High but not perfect confidence
+                confidence_scores = torch.rand(16) * 0.15 + 0.85  # Range 0.85-1.0
         
         kp2d_smpl = torch.tensor(self.mpii_to_smpl(joints_2d_mpii.numpy()), dtype=torch.float32)
 
@@ -154,16 +282,13 @@ class SyntheticPoseDataset(Dataset):
             "K": K,
             "R": R,
             "t": t,
-            "sample_id": did,  # Use the sample ID
-            "avg_confidence": 1.0,  # Synthetic = perfect confidence
+            "sample_id": did,
+            "avg_confidence": confidence_scores.mean().item(),
+            "confidence_scores": confidence_scores,
             "sequence_name": "synthetic",
-            "frame_idx": -1,  # Not applicable for synthetic
-            "actor_idx": -1,  # Not applicable for synthetic
+            "frame_idx": -1,
+            "actor_idx": -1,
         }
-
-        #rgb_path = os.path.join(self.paths["rgb"], f"{did}.png")
-        #if os.path.exists(rgb_path):
-        #    sample["rgb"] = torch.tensor(np.array(Image.open(rgb_path)))
 
         root = sample["joints_3d"][0].clone()
         sample["joints_3d_centered"] = sample["joints_3d"] - root

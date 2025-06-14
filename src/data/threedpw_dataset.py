@@ -1,6 +1,5 @@
 """
-3DPW Dataset Loader for Domain Mixing Training
-Create this file as: src/data/threedpw_dataset.py
+FIXED: 3DPW Dataset Loader for Domain Mixing Training
 """
 
 import os
@@ -16,6 +15,11 @@ PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", ".."))
 sys.path.insert(0, PROJECT_ROOT)
 
 from src.utils import rotation_utils
+
+# FIXED: Consistent joint definitions
+SMPL_EXTREMITY_JOINTS = [7, 8, 10, 11, 18, 19, 20, 21, 22, 23]  # ankles, feet, wrists, hands
+SMPL_CORE_JOINTS = [0, 1, 2, 3, 4, 5, 6, 9, 12, 13, 14, 15, 16, 17]  # pelvis, hips, knees, spine, shoulders, elbows
+
 
 class ThreeDPWDataset(Dataset):
   
@@ -75,7 +79,8 @@ class ThreeDPWDataset(Dataset):
                                     'frame_idx': frame_idx,
                                     'actor_idx': actor_idx,
                                     'detection_file': det_path,
-                                    'avg_confidence': np.mean(scores)
+                                    'avg_confidence': np.mean(scores),
+                                    'confidence_scores': scores  # Store per-joint scores
                                 })
             
             except Exception as e:
@@ -118,7 +123,6 @@ class ThreeDPWDataset(Dataset):
 
         rot_matrices = rotation_utils.rot_6d_to_matrix(rot_6d.reshape(1, 24, 6)).squeeze(0)
         
-        
         K = np.array(actor_data['K'], dtype=np.float32)  
         R = np.array(actor_data['R'], dtype=np.float32)  
         t = np.array(actor_data['t'], dtype=np.float32)  
@@ -127,6 +131,8 @@ class ThreeDPWDataset(Dataset):
         R = torch.tensor(R, dtype=torch.float32)
         t = torch.tensor(t, dtype=torch.float32)
         
+        # Get confidence scores
+        confidence_scores = torch.tensor(actor_data['scores'], dtype=torch.float32)
         
         sample = {
             "joints_2d_mpii": joints_2d_mpii,
@@ -139,15 +145,14 @@ class ThreeDPWDataset(Dataset):
             "t": t,
             "sample_id": sample_info['sample_id'],
             "avg_confidence": sample_info['avg_confidence'],
+            "confidence_scores": confidence_scores,  # Per-joint confidence
             "sequence_name": sample_info['sequence_name'],
             "frame_idx": sample_info['frame_idx'],
             "actor_idx": sample_info['actor_idx']
         }
         
-        
         sample["joints_3d"] = joints_3d_centered.clone()  
         sample["joints_3d_world"] = joints_3d_centered.clone()  
-        
         
         if self.transform:
             sample = self.transform(sample)
@@ -173,9 +178,122 @@ class ThreeDPWDataset(Dataset):
         }
 
 
+class JointLevelMixedDataset(Dataset):
+    """
+    ENHANCED: Dataset that mixes at joint level AND includes pure real samples
+    """
+    
+    def __init__(self, synthetic_dataset, threedpw_dataset, 
+                 joint_mix_prob=0.3, pure_real_prob=0.2, seed=42):
+        """
+        Args:
+            synthetic_dataset: SyntheticPoseDataset instance
+            threedpw_dataset: ThreeDPWDataset instance  
+            joint_mix_prob: Probability of mixing joints within a sample
+            pure_real_prob: Probability of including pure real samples
+            seed: Random seed
+        """
+        self.synthetic_dataset = synthetic_dataset
+        self.threedpw_dataset = threedpw_dataset
+        self.joint_mix_prob = joint_mix_prob
+        self.pure_real_prob = pure_real_prob
+        
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        
+        # Create paired samples for mixing
+        self.num_synthetic = len(synthetic_dataset)
+        self.num_real = len(threedpw_dataset)
+        
+        # For each synthetic sample, assign a random real sample for potential mixing
+        if self.num_real > 0:
+            self.real_pairs = np.random.randint(0, self.num_real, size=self.num_synthetic)
+        else:
+            self.real_pairs = []
+        
+        print(f"📊 ENHANCED Joint-Level Mixed Dataset:")
+        print(f"   Synthetic samples: {self.num_synthetic}")
+        print(f"   Real samples: {self.num_real}")
+        print(f"   Joint mix probability: {joint_mix_prob:.1%}")
+        print(f"   Pure real probability: {pure_real_prob:.1%}")
+    
+    def __len__(self):
+        return self.num_synthetic
+    
+    def __getitem__(self, idx):
+        # ENHANCED: Three-way decision for better domain exposure
+        choice = torch.rand(()).item()
+        
+        if choice < self.pure_real_prob and self.num_real > 0:
+            # Option 1: Pure real sample (for domain discriminator training)
+            real_idx = self.real_pairs[idx]
+            sample = self.threedpw_dataset[real_idx]
+            sample['dataset_type'] = '3dpw'
+            return sample
+            
+        elif choice < self.pure_real_prob + self.joint_mix_prob and self.num_real > 0:
+            # Option 2: Joint-level mixed sample (for domain breaking)
+            syn_sample = self.synthetic_dataset[idx]
+            real_idx = self.real_pairs[idx]
+            real_sample = self.threedpw_dataset[real_idx]
+            mixed_sample = self._mix_joints(syn_sample, real_sample)
+            mixed_sample['dataset_type'] = 'joint_mixed'
+            return mixed_sample
+            
+        else:
+            # Option 3: Pure synthetic sample
+            sample = self.synthetic_dataset[idx]
+            sample['dataset_type'] = 'synthetic'
+            return sample
+    
+    def _mix_joints(self, syn_sample, real_sample):
+        """FIXED: Mix synthetic and real joints with consistent indices"""
+        mixed_sample = syn_sample.copy()
+        
+        # Randomly decide mixing strategy
+        strategy = torch.rand(()).item()
+        
+        if strategy < 0.33:
+            # Strategy 1: Real core + Synthetic extremities
+            # Replace core joints with real data
+            for joint_idx in SMPL_CORE_JOINTS:
+                if joint_idx < mixed_sample['joints_2d'].shape[0]:
+                    mixed_sample['joints_2d'][joint_idx] = real_sample['joints_2d'][joint_idx]
+            
+            # FIXED: Blend confidence scores properly
+            mixed_confidence = syn_sample['confidence_scores'].clone()
+            # For mixed data, create intermediate confidence
+            mixed_sample['avg_confidence'] = (syn_sample['avg_confidence'] + real_sample['avg_confidence']) / 2
+            
+        elif strategy < 0.66:
+            # Strategy 2: Synthetic core + Real extremities
+            # Replace extremity joints with real data
+            for joint_idx in SMPL_EXTREMITY_JOINTS:
+                if joint_idx < mixed_sample['joints_2d'].shape[0]:
+                    mixed_sample['joints_2d'][joint_idx] = real_sample['joints_2d'][joint_idx]
+                    
+        else:
+            # Strategy 3: Random mixing (50% of all joints)
+            num_joints = mixed_sample['joints_2d'].shape[0]
+            joints_to_replace = torch.randperm(num_joints)[:num_joints//2]
+            for joint_idx in joints_to_replace:
+                if joint_idx < real_sample['joints_2d'].shape[0]:
+                    mixed_sample['joints_2d'][joint_idx] = real_sample['joints_2d'][joint_idx]
+        
+        # Update average confidence for mixed samples
+        mixed_sample['avg_confidence'] = (syn_sample['avg_confidence'] + real_sample['avg_confidence']) / 2
+        
+        # FIXED: Update confidence scores to reflect mixing
+        # This prevents the model from using confidence as a domain signal
+        mixed_confidence = (syn_sample['confidence_scores'] + real_sample['confidence_scores']) / 2
+        mixed_sample['confidence_scores'] = mixed_confidence
+        
+        return mixed_sample
+
+
 class MixedPoseDataset(Dataset):
     """
-    Mixed dataset combining synthetic and 3DPW data for domain mixing training
+    FIXED: Mixed dataset with proper domain labeling
     """
     
     def __init__(self, synthetic_dataset, threedpw_dataset, 
@@ -193,7 +311,6 @@ class MixedPoseDataset(Dataset):
         
         np.random.seed(seed)
         
-        
         total_synthetic = len(synthetic_dataset)
         total_real = len(threedpw_dataset)
         
@@ -201,13 +318,11 @@ class MixedPoseDataset(Dataset):
             print("⚠️  No 3DPW samples available, using only synthetic data")
             self.real_data_ratio = 0.0
         
-        
         if self.real_data_ratio > 0:
             target_real_samples = int(total_synthetic * self.real_data_ratio / (1 - self.real_data_ratio))
             target_real_samples = min(target_real_samples, total_real)
         else:
             target_real_samples = 0
-        
         
         self.synthetic_indices = list(range(total_synthetic))
         
@@ -220,17 +335,13 @@ class MixedPoseDataset(Dataset):
         else:
             self.real_indices = []
         
-        
         self.mixed_samples = []
-        
         
         for idx in self.synthetic_indices:
             self.mixed_samples.append(('synthetic', idx))
         
-        
         for idx in self.real_indices:
             self.mixed_samples.append(('real', idx))
-        
         
         np.random.shuffle(self.mixed_samples)
         
@@ -273,24 +384,12 @@ class MixedPoseDataset(Dataset):
 
 
 def create_domain_mixing_datasets(data_root, real_data_ratio=0.2, transform=None, 
-                                 min_confidence=0.3, seed=42):
+                                 min_confidence=0.3, seed=42, use_joint_mixing=True):
     """
-    Convenience function to create mixed training and validation datasets
-    
-    Args:
-        data_root: Root directory containing both synthetic and 3DPW data
-        real_data_ratio: Fraction of real data in mixed dataset
-        transform: Transform to apply to all samples
-        min_confidence: Minimum confidence for 3DPW samples
-        seed: Random seed for reproducible mixing
-    
-    Returns:
-        train_dataset, val_dataset (both MixedPoseDataset instances)
+    FIXED: Create mixed training and validation datasets with proper setup
     """
-    
     
     from src.data.synthetic_pose_dataset import SyntheticPoseDataset
-    
     
     train_split_txt = os.path.join(data_root, "splits", "train.txt")
     val_split_txt = os.path.join(data_root, "splits", "val.txt")
@@ -299,16 +398,18 @@ def create_domain_mixing_datasets(data_root, real_data_ratio=0.2, transform=None
         data_root=data_root,
         split_txt=train_split_txt,
         transform=transform,
-        augment_2d=True  
+        augment_2d=True,
+        break_domain_discrimination=True,  # Enable extremity corruption
+        corruption_schedule='progressive'
     )
     
     synthetic_val = SyntheticPoseDataset(
         data_root=data_root,
         split_txt=val_split_txt,
         transform=transform,
-        augment_2d=False
+        augment_2d=False,
+        break_domain_discrimination=True  # Light corruption even in validation
     )
-    
     
     threedpw_train = ThreeDPWDataset(
         data_root=data_root,
@@ -324,14 +425,25 @@ def create_domain_mixing_datasets(data_root, real_data_ratio=0.2, transform=None
         min_confidence=min_confidence
     )
     
+    if use_joint_mixing:
+        # Use ENHANCED joint-level mixing for training
+        mixed_train = JointLevelMixedDataset(
+            synthetic_dataset=synthetic_train,
+            threedpw_dataset=threedpw_train,
+            joint_mix_prob=0.3,
+            pure_real_prob=0.2,  # Include 20% pure real samples for domain discriminator
+            seed=seed
+        )
+    else:
+        # Original sample-level mixing
+        mixed_train = MixedPoseDataset(
+            synthetic_dataset=synthetic_train,
+            threedpw_dataset=threedpw_train,
+            real_data_ratio=real_data_ratio,
+            seed=seed
+        )
     
-    mixed_train = MixedPoseDataset(
-        synthetic_dataset=synthetic_train,
-        threedpw_dataset=threedpw_train,
-        real_data_ratio=real_data_ratio,
-        seed=seed
-    )
-    
+    # Validation uses sample-level mixing
     mixed_val = MixedPoseDataset(
         synthetic_dataset=synthetic_val,
         threedpw_dataset=threedpw_val,
@@ -339,49 +451,32 @@ def create_domain_mixing_datasets(data_root, real_data_ratio=0.2, transform=None
         seed=seed + 1  
     )
     
-    print(f"\n✅ Created domain mixing datasets with {real_data_ratio:.1%} real data")
+    print(f"\n✅ Created domain mixing datasets")
+    if use_joint_mixing:
+        print(f"   Training: Joint-level mixing enabled")
+    else:
+        print(f"   Training: Sample-level mixing with {real_data_ratio:.1%} real data")
     
     return mixed_train, mixed_val
 
 
 if __name__ == "__main__":
-    """Test the 3DPW dataset loader"""
-    
+    """Test the datasets"""
     
     data_root = os.path.join(PROJECT_ROOT, "data")
     
     try:
-        dataset = ThreeDPWDataset(
+        # Test with joint mixing
+        train_dataset, val_dataset = create_domain_mixing_datasets(
             data_root=data_root,
-            split="train",
-            min_confidence=0.3
+            real_data_ratio=0.586,
+            use_joint_mixing=True
         )
         
-        if len(dataset) > 0:
-            
-            sample = dataset[0]
-            
-            print(f"\n📋 Sample format verification:")
-            print(f"   joints_2d_mpii shape: {sample['joints_2d_mpii'].shape}")
-            print(f"   joints_2d shape: {sample['joints_2d'].shape}")
-            print(f"   joints_3d_centered shape: {sample['joints_3d_centered'].shape}")
-            print(f"   rot_6d shape: {sample['rot_6d'].shape}")
-            print(f"   K shape: {sample['K'].shape}")
-            print(f"   R shape: {sample['R'].shape}")
-            print(f"   t shape: {sample['t'].shape}")
-            print(f"   Sample ID: {sample['sample_id']}")
-            print(f"   Avg confidence: {sample['avg_confidence']:.3f}")
-            
-            
-            stats = dataset.get_dataset_stats()
-            print(f"\n📊 Dataset statistics:")
-            for key, value in stats.items():
-                print(f"   {key}: {value}")
+        print("\n📋 Testing joint-mixed training sample:")
+        sample = train_dataset[0]
+        print(f"   Dataset type: {sample['dataset_type']}")
+        print(f"   Confidence: {sample['avg_confidence']:.3f}")
         
-        else:
-            print("⚠️  No samples found in dataset")
-    
     except Exception as e:
-        print(f"❌ Error testing 3DPW dataset: {e}")
-        print("Make sure you have run the preprocessing script first!")
-
+        print(f"❌ Error: {e}")
