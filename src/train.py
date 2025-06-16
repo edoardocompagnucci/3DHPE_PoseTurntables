@@ -116,12 +116,12 @@ def main():
     SYNTHETIC_RATIO = 0.7   # Only used when mode='mixed'
     
     # Augmentation parameters
-    AUGMENT_2D = True
-    CAMERA_AUG_ROTATION_DEG = 8.0
-    CAMERA_AUG_TRANSLATION_M = 0.02
-    NOISE_STD = 0.02
-    CONFIDENCE_NOISE = 0.005
-    MAX_SHIFT = 0.005
+    AUGMENT_2D = False
+    CAMERA_AUG_ROTATION_DEG = 0.0
+    CAMERA_AUG_TRANSLATION_M = 0.00
+    NOISE_STD = 0.00
+    CONFIDENCE_NOISE = 0.00
+    MAX_SHIFT = 0.00
 
     # Early stopping
     early_stopping_patience = 50
