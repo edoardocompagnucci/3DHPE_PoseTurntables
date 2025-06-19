@@ -33,8 +33,20 @@ def _load_bone_data():
     _bone_data_loaded = True
     print(f"✅ Loaded bone data: {len(_edges)} bones")
 
-def mpjpe_loss(predicted, target):
 
+def position_mse_loss(predicted, target):
+    """
+    MSE loss for 3D positions - standard for training
+    This is what most papers use for actual backpropagation
+    """
+    return torch.nn.functional.mse_loss(predicted, target)
+
+
+def mpjpe_metric(predicted, target):
+    """
+    MPJPE metric for evaluation and logging only
+    Not used for backpropagation due to gradient issues with sqrt
+    """
     batch_size = predicted.shape[0]
     num_joints = predicted.shape[1] // 3
 
@@ -93,8 +105,16 @@ def bone_length_loss(predicted_poses):
 
 
 def combined_pose_loss(pred_dict, target_dict, pos_weight=1.0, rot_weight=0.1, use_geodesic=True):
-
-    pos_loss = mpjpe_loss(pred_dict['positions'], target_dict['positions'])
+    """
+    Combined loss WITHOUT bone length constraint
+    Uses MSE for position training, but also computes MPJPE for logging
+    """
+    # MSE for backpropagation (standard practice)
+    pos_loss = position_mse_loss(pred_dict['positions'], target_dict['positions'])
+    
+    # MPJPE for logging only (no gradients)
+    with torch.no_grad():
+        mpjpe = mpjpe_metric(pred_dict['positions'], target_dict['positions'])
     
     if use_geodesic:
         rot_loss = geodesic_loss(pred_dict['rotations'], target_dict['rotations'])
@@ -105,13 +125,23 @@ def combined_pose_loss(pred_dict, target_dict, pos_weight=1.0, rot_weight=0.1, u
     
     return {
         'total': total_loss,
-        'position': pos_loss,
-        'rotation': rot_loss
+        'position': pos_loss,     # MSE for training
+        'rotation': rot_loss,
+        'mpjpe': mpjpe           # MPJPE in meters for logging
     }
 
 
 def combined_pose_bone_loss(pred_dict, target_dict, pos_weight=1.0, rot_weight=0.1, bone_weight=0.05, use_geodesic=True):
-    pos_loss = mpjpe_loss(pred_dict['positions'], target_dict['positions'])
+    """
+    Combined loss WITH bone length constraint
+    Uses MSE for position training, but also computes MPJPE for logging
+    """
+    # MSE for backpropagation (standard practice)
+    pos_loss = position_mse_loss(pred_dict['positions'], target_dict['positions'])
+    
+    # MPJPE for logging only (no gradients)
+    with torch.no_grad():
+        mpjpe = mpjpe_metric(pred_dict['positions'], target_dict['positions'])
     
     if use_geodesic:
         rot_loss = geodesic_loss(pred_dict['rotations'], target_dict['rotations'])
@@ -126,7 +156,8 @@ def combined_pose_bone_loss(pred_dict, target_dict, pos_weight=1.0, rot_weight=0
     
     return {
         'total': total_loss,
-        'position': pos_loss,
+        'position': pos_loss,     # MSE for training
         'rotation': rot_loss,
-        'bone': bone_loss
+        'bone': bone_loss,
+        'mpjpe': mpjpe           # MPJPE in meters for logging
     }
